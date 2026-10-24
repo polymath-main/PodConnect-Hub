@@ -1,0 +1,6 @@
+{
+  "name": "PodConnect Hub AI",
+  "description": "Autonomous enterprise assistant and podcast marketing operations manager for client onboarding, multi-source lead scraping, master database syncing, milestone scheduling, and outreach.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
