@@ -3,6 +3,7 @@
 PodConnect Autonomous Lead Sourcing & Scraping Engine
 Compliant, zero-paid-API podcast lead extractor using native Python standard libraries.
 Parses public directory endpoints, RSS feeds, and search dorks with robots.txt courtesy.
+Supports Pre-Import Staging, Data Selection, Lead Editing/Discarding, and Central Tag Bank.
 """
 
 import sys
@@ -17,7 +18,7 @@ import urllib.parse
 from html.parser import HTMLParser
 import xml.etree.ElementTree as ET
 
-# Simple lightweight HTML text and anchor extractor using standard library
+
 class LinkAndTextExtractor(HTMLParser):
     def __init__(self):
         super().__init__()
@@ -49,6 +50,64 @@ class LinkAndTextExtractor(HTMLParser):
         return " ".join(self.text_chunks)
 
 
+def generate_lead_tags(niche, platform, subs=2500, host_name="Show Host"):
+    """Generates normalized keyword and metadata tags based on niche, platform, and audience"""
+    tags = []
+    
+    # Niche derived tags
+    parts = [p.strip() for p in re.split(r'[,;/|]+', niche) if p.strip()]
+    for p in parts:
+        if len(p) <= 24 and p not in tags:
+            tags.append(p)
+            
+    # Sub-keyword extraction
+    lower_niche = niche.lower()
+    keyword_map = {
+        "saas": "SaaS",
+        "b2b": "B2B",
+        "ai": "AI & ML",
+        "devops": "DevOps",
+        "cloud": "Cloud",
+        "tech": "Tech",
+        "marketing": "Marketing",
+        "growth": "Growth",
+        "sales": "Sales",
+        "finance": "Finance",
+        "investing": "Investing",
+        "startup": "Startups",
+        "founder": "Founders",
+        "health": "Health",
+        "biohacking": "Biohacking",
+        "crypto": "Web3/Crypto",
+        "ecommerce": "E-Commerce",
+        "product": "Product",
+        "leadership": "Leadership",
+    }
+    for k, v in keyword_map.items():
+        if k in lower_niche and v not in tags:
+            tags.append(v)
+
+    # Platform tag
+    if platform and platform not in tags:
+        tags.append(platform)
+
+    # Audience scale tag
+    if subs >= 25000:
+        tags.append("Top Tier (25k+)")
+    elif subs >= 10000:
+        tags.append("Enterprise Reach (10k+)")
+    elif subs >= 5000:
+        tags.append("High Reach (5k+)")
+    else:
+        tags.append("Targeted Niche")
+
+    # Host verified tag
+    if host_name and host_name != "Show Host" and "Host Verified" not in tags:
+        tags.append("Host Identified")
+
+    return tags[:8]
+
+
 class PodcastLeadScraper:
     def __init__(self, db_name="podconnect_leads.db"):
         self.db_name = db_name
@@ -67,6 +126,29 @@ class PodcastLeadScraper:
 
     def create_tables(self):
         cursor = self.conn.cursor()
+
+        # 1. Staging table: Pre-import holding area for review, filtering, editing, and discard
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS staged_leads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_id TEXT,
+                show_name TEXT,
+                host_name TEXT,
+                platform TEXT,
+                show_url TEXT,
+                feed_url TEXT,
+                email TEXT,
+                subscribers INTEGER,
+                niche TEXT,
+                tags TEXT,
+                score REAL,
+                location TEXT,
+                date_scraped TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(client_id, show_name)
+            )
+        ''')
+
+        # 2. Central Core Database: Approved, imported leads bank
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS leads (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -80,11 +162,34 @@ class PodcastLeadScraper:
                 subscribers INTEGER,
                 niche TEXT,
                 score REAL,
-                status TEXT DEFAULT 'New',
+                status TEXT DEFAULT 'Imported',
                 date_added TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(client_id, show_name)
             )
         ''')
+
+        # Run safe migrations for additional columns if needed
+        cursor.execute("PRAGMA table_info(leads)")
+        existing_cols = [c[1] for c in cursor.fetchall()]
+
+        if "tags" not in existing_cols:
+            try:
+                cursor.execute("ALTER TABLE leads ADD COLUMN tags TEXT")
+            except Exception:
+                pass
+
+        if "notes" not in existing_cols:
+            try:
+                cursor.execute("ALTER TABLE leads ADD COLUMN notes TEXT")
+            except Exception:
+                pass
+
+        if "location" not in existing_cols:
+            try:
+                cursor.execute("ALTER TABLE leads ADD COLUMN location TEXT")
+            except Exception:
+                pass
+
         self.conn.commit()
 
     def extract_emails_from_text(self, text):
@@ -110,7 +215,7 @@ class PodcastLeadScraper:
         try:
             with urllib.request.urlopen(req, timeout=timeout) as response:
                 content_type = response.headers.get('Content-Type', '')
-                raw_data = response.read(2 * 1024 * 1024) # Up to 2MB
+                raw_data = response.read(2 * 1024 * 1024)
                 try:
                     text = raw_data.decode('utf-8', errors='ignore')
                 except Exception:
@@ -124,7 +229,7 @@ class PodcastLeadScraper:
         """Evaluates and scores lead based on subscriber metrics and email presence"""
         score = base_score
         text_lower = text.lower()
-        subs = 2500 # Realistic baseline for active directory podcasts
+        subs = 2500
 
         sub_match = re.search(r'([\d,.]+)\s*(k|m)?\s*(subscribers|subs|followers|listeners|downloads|episodes)', text_lower)
         if sub_match:
@@ -146,7 +251,7 @@ class PodcastLeadScraper:
 
         return max(1.0, min(10.0, round(score, 1))), int(subs)
 
-    def parse_rss_feed(self, rss_url, client_id, niche, min_subs=1000):
+    def parse_rss_feed(self, rss_url, client_id, niche, min_subs=1000, stage_immediately=True):
         """Parses public RSS feed for show metadata and contact info with regex fallback"""
         text, content_type = self.fetch_url(rss_url)
         if not text:
@@ -158,7 +263,6 @@ class PodcastLeadScraper:
         description = ""
         emails = []
 
-        # Try standard XML element tree
         try:
             root = ET.fromstring(text)
             channel = root.find('channel')
@@ -179,7 +283,6 @@ class PodcastLeadScraper:
         except Exception:
             pass
 
-        # Regex fallback if XML root was incomplete or unclosed
         if not title:
             title_match = re.search(r'<title>(.*?)</title>', text, re.I | re.S)
             if title_match:
@@ -210,6 +313,7 @@ class PodcastLeadScraper:
 
         primary_email = emails[0] if emails else ""
         score, subs = self.evaluate_lead(description + " " + text[:15000], emails, min_subs=min_subs)
+        tags = generate_lead_tags(niche, "RSS Feed", subs=subs, host_name=host_name)
 
         lead = {
             "client_id": client_id,
@@ -221,83 +325,30 @@ class PodcastLeadScraper:
             "email": primary_email,
             "subscribers": subs,
             "niche": niche,
+            "tags": tags,
             "score": score
         }
-        self.save_lead(lead)
+
+        if stage_immediately:
+            self.save_staged_lead(lead)
+        else:
+            self.save_lead(lead)
+
         return lead
 
-    def scrape_directory_url(self, url, client_id, niche, min_subs=1000):
-        """Scrapes web page for podcast show information, host name, and contact"""
-        text_content, _ = self.fetch_url(url)
-        if not text_content:
-            return None
-
-        extractor = LinkAndTextExtractor()
-        try:
-            extractor.feed(text_content)
-        except Exception:
-            pass
-
-        title = extractor.title or "Podcast Show"
-        # Clean title (e.g., "The SaaS Growth Show on Apple Podcasts")
-        title_clean = re.sub(r'(\s*[-|–]\s*(Apple Podcasts|YouTube|Spotify|Podcast)).*', '', title, flags=re.I).strip()
-        body_text = extractor.get_text()
-
-        # Extract emails from text and mailto links
-        emails = self.extract_emails_from_text(body_text)
-        for link in extractor.links:
-            if link.startswith('mailto:'):
-                clean_mail = link.replace('mailto:', '').split('?')[0].strip()
-                if clean_mail and clean_mail not in emails:
-                    emails.append(clean_mail)
-
-        # Infer host name
-        host_name = "Show Host"
-        host_match = re.search(r'(hosted by|host:\s*|with host\s*)([A-Z][a-z]+ [A-Z][a-z]+)', body_text, re.I)
-        if host_match:
-            host_name = host_match.group(2)
-
-        # Platform detection
-        platform = "Web"
-        if "apple.com" in url:
-            platform = "Apple Podcasts"
-        elif "youtube.com" in url:
-            platform = "YouTube"
-        elif "spotify.com" in url:
-            platform = "Spotify"
-        elif "buzzsprout.com" in url:
-            platform = "Buzzsprout"
-        elif "captivate.fm" in url:
-            platform = "Captivate"
-
-        score, subs = self.evaluate_lead(body_text, emails, min_subs=min_subs)
-        primary_email = emails[0] if emails else ""
-
-        lead = {
-            "client_id": client_id,
-            "show_name": title_clean or title,
-            "host_name": host_name,
-            "platform": platform,
-            "show_url": url,
-            "feed_url": "",
-            "email": primary_email,
-            "subscribers": subs,
-            "niche": niche,
-            "score": score
-        }
-        self.save_lead(lead)
-        return lead
-
-    def save_lead(self, lead):
-        """Saves lead to SQLite with deduplication"""
+    def save_staged_lead(self, lead):
+        """Saves scraped lead to the STAGING area for operator validation, edit, and approval"""
         cursor = self.conn.cursor()
+        tags_json = json.dumps(lead.get("tags") or generate_lead_tags(lead["niche"], lead["platform"], lead.get("subscribers", 2500), lead.get("host_name", "Show Host")))
+        
         cursor.execute('''
-            INSERT INTO leads (client_id, show_name, host_name, platform, show_url, feed_url, email, subscribers, niche, score, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'New')
+            INSERT INTO staged_leads (client_id, show_name, host_name, platform, show_url, feed_url, email, subscribers, niche, tags, score, location)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(client_id, show_name) DO UPDATE SET
                 host_name = excluded.host_name,
-                email = CASE WHEN excluded.email != '' THEN excluded.email ELSE leads.email END,
-                subscribers = max(leads.subscribers, excluded.subscribers),
+                email = CASE WHEN excluded.email != '' THEN excluded.email ELSE staged_leads.email END,
+                subscribers = max(staged_leads.subscribers, excluded.subscribers),
+                tags = excluded.tags,
                 score = excluded.score
         ''', (
             lead["client_id"],
@@ -306,23 +357,32 @@ class PodcastLeadScraper:
             lead["platform"],
             lead["show_url"],
             lead.get("feed_url", ""),
-            lead["email"],
-            lead["subscribers"],
+            lead.get("email", ""),
+            lead.get("subscribers", 2500),
             lead["niche"],
-            lead["score"]
+            tags_json,
+            lead.get("score", 8.0),
+            lead.get("location", "Global / Remote")
         ))
         self.conn.commit()
-        self.log(f"Lead saved and indexed: {lead['show_name']} ({lead['platform']})", lead=lead)
+        self.log(f"[STAGED] Scraped lead held in review area: {lead['show_name']} ({lead['platform']})", lead=lead)
 
-    def get_leads(self, client_id=None):
+    def get_staged_leads(self, client_id=None):
+        """Returns all staged leads waiting for review"""
         cursor = self.conn.cursor()
         if client_id:
-            cursor.execute('SELECT id, client_id, show_name, host_name, platform, show_url, feed_url, email, subscribers, niche, score, status, date_added FROM leads WHERE client_id = ? ORDER BY score DESC, subscribers DESC', (client_id,))
+            cursor.execute('SELECT id, client_id, show_name, host_name, platform, show_url, feed_url, email, subscribers, niche, tags, score, location, date_scraped FROM staged_leads WHERE client_id = ? ORDER BY date_scraped DESC', (client_id,))
         else:
-            cursor.execute('SELECT id, client_id, show_name, host_name, platform, show_url, feed_url, email, subscribers, niche, score, status, date_added FROM leads ORDER BY score DESC, subscribers DESC')
+            cursor.execute('SELECT id, client_id, show_name, host_name, platform, show_url, feed_url, email, subscribers, niche, tags, score, location, date_scraped FROM staged_leads ORDER BY date_scraped DESC')
         rows = cursor.fetchall()
         leads = []
         for r in rows:
+            tags = []
+            try:
+                tags = json.loads(r[10]) if r[10] else []
+            except Exception:
+                tags = [t.strip() for t in (r[10] or "").split(',') if t.strip()]
+
             leads.append({
                 "id": r[0],
                 "clientId": r[1],
@@ -334,39 +394,188 @@ class PodcastLeadScraper:
                 "email": r[7],
                 "subscribers": r[8],
                 "niche": r[9],
-                "score": r[10],
-                "status": r[11],
-                "dateAdded": r[12]
+                "tags": tags,
+                "score": r[11],
+                "location": r[12],
+                "dateScraped": r[13]
+            })
+        return leads
+
+    def import_staged_leads(self, staged_ids):
+        """Approves and imports selected staged leads into the central core database"""
+        cursor = self.conn.cursor()
+        imported = []
+        for s_id in staged_ids:
+            cursor.execute('SELECT id, client_id, show_name, host_name, platform, show_url, feed_url, email, subscribers, niche, tags, score, location FROM staged_leads WHERE id = ?', (s_id,))
+            row = cursor.fetchone()
+            if not row:
+                continue
+
+            tags = row[10] or json.dumps(generate_lead_tags(row[9], row[4], row[8], row[3]))
+
+            # Insert into core leads table with status 'Imported'
+            cursor.execute('''
+                INSERT INTO leads (client_id, show_name, host_name, platform, show_url, feed_url, email, subscribers, niche, tags, score, status, location)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Imported', ?)
+                ON CONFLICT(client_id, show_name) DO UPDATE SET
+                    host_name = excluded.host_name,
+                    email = CASE WHEN excluded.email != '' THEN excluded.email ELSE leads.email END,
+                    subscribers = max(leads.subscribers, excluded.subscribers),
+                    tags = excluded.tags,
+                    score = excluded.score
+            ''', (row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9], tags, row[11], row[12]))
+
+            # Remove from staged area
+            cursor.execute('DELETE FROM staged_leads WHERE id = ?', (s_id,))
+            imported.append({"id": s_id, "showName": row[2], "clientId": row[1]})
+
+        self.conn.commit()
+        return imported
+
+    def delete_staged_lead(self, staged_id):
+        cursor = self.conn.cursor()
+        cursor.execute('DELETE FROM staged_leads WHERE id = ?', (staged_id,))
+        self.conn.commit()
+        return True
+
+    def edit_staged_lead(self, staged_id, data):
+        cursor = self.conn.cursor()
+        tags_json = json.dumps(data.get("tags") or [])
+        cursor.execute('''
+            UPDATE staged_leads SET
+                show_name = ?,
+                host_name = ?,
+                platform = ?,
+                show_url = ?,
+                email = ?,
+                subscribers = ?,
+                niche = ?,
+                tags = ?,
+                score = ?,
+                location = ?
+            WHERE id = ?
+        ''', (
+            data["showName"],
+            data.get("hostName", "Show Host"),
+            data.get("platform", "Podcast"),
+            data.get("showUrl", ""),
+            data.get("email", ""),
+            int(data.get("subscribers", 1000)),
+            data.get("niche", "General"),
+            tags_json,
+            float(data.get("score", 7.5)),
+            data.get("location", "Global"),
+            staged_id
+        ))
+        self.conn.commit()
+        return True
+
+    def save_lead(self, lead):
+        """Saves lead directly into the approved core database"""
+        cursor = self.conn.cursor()
+        tags_json = json.dumps(lead.get("tags") or generate_lead_tags(lead["niche"], lead["platform"], lead.get("subscribers", 2500), lead.get("host_name", "Show Host")))
+        
+        cursor.execute('''
+            INSERT INTO leads (client_id, show_name, host_name, platform, show_url, feed_url, email, subscribers, niche, tags, score, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Imported')
+            ON CONFLICT(client_id, show_name) DO UPDATE SET
+                host_name = excluded.host_name,
+                email = CASE WHEN excluded.email != '' THEN excluded.email ELSE leads.email END,
+                subscribers = max(leads.subscribers, excluded.subscribers),
+                tags = excluded.tags,
+                score = excluded.score
+        ''', (
+            lead["client_id"],
+            lead["show_name"],
+            lead["host_name"],
+            lead["platform"],
+            lead["show_url"],
+            lead.get("feed_url", ""),
+            lead["email"],
+            lead["subscribers"],
+            lead["niche"],
+            tags_json,
+            lead["score"]
+        ))
+        self.conn.commit()
+        self.log(f"Lead committed to database: {lead['show_name']} ({lead['platform']})", lead=lead)
+
+    def get_leads(self, client_id=None, niche=None, tag=None, status=None, search=None):
+        """Retrieves leads from the central database with multi-facet filters"""
+        cursor = self.conn.cursor()
+        query = 'SELECT id, client_id, show_name, host_name, platform, show_url, feed_url, email, subscribers, niche, tags, score, status, date_added, notes, location FROM leads WHERE 1=1'
+        params = []
+
+        if client_id:
+            query += ' AND client_id = ?'
+            params.append(client_id)
+        if niche:
+            query += ' AND niche LIKE ?'
+            params.append(f'%{niche}%')
+        if status and status.lower() != 'all':
+            query += ' AND status = ?'
+            params.append(status)
+        if search:
+            query += ' AND (show_name LIKE ? OR host_name LIKE ? OR email LIKE ? OR niche LIKE ?)'
+            wild = f'%{search}%'
+            params.extend([wild, wild, wild, wild])
+
+        query += ' ORDER BY score DESC, subscribers DESC'
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        leads = []
+        for r in rows:
+            tags = []
+            try:
+                tags = json.loads(r[10]) if r[10] else []
+            except Exception:
+                tags = [t.strip() for t in (r[10] or "").split(',') if t.strip()]
+
+            # Tag in-memory filter if specified
+            if tag and tag.lower() != 'all':
+                if not any(tag.lower() in t.lower() for t in tags):
+                    continue
+
+            leads.append({
+                "id": r[0],
+                "clientId": r[1],
+                "showName": r[2],
+                "hostName": r[3],
+                "platform": r[4],
+                "showUrl": r[5],
+                "feedUrl": r[6],
+                "email": r[7],
+                "subscribers": r[8],
+                "niche": r[9],
+                "tags": tags,
+                "score": r[11],
+                "status": r[12],
+                "dateAdded": r[13],
+                "notes": r[14],
+                "location": r[15]
             })
         return leads
 
 
-def run_discovery_pipeline(client_id, niche, min_subs=1000, target_count=5):
+def run_discovery_pipeline(client_id, niche, min_subs=1000, target_count=5, stage_only=True):
     scraper = PodcastLeadScraper()
     scraper.log(f"Initializing Multi-Source Lead Sourcing for Client {client_id} (Niche: {niche})")
     scraper.log("Enforcing compliance: parsing robots.txt rules and establishing token-bucket rate limits")
 
-    # High quality open podcast feeds and directory endpoints for common niches
-    niche_lower = niche.lower()
-    discovered_leads = []
-
-    # Well-known public RSS feeds across popular agency niches for real extraction
     sample_feeds = [
-        # Tech & SaaS
-        ("https://feeds.simplecast.com/54nAGcIl", "tech saas startup software ai"), # The Changelog
-        ("https://feeds.megaphone.fm/recodedecode", "tech media venture business"), # Recode Decode / Tech
-        ("https://softwareengineeringdaily.com/feed/podcast/", "engineering software architecture tech ai"), # SE Daily
-        ("https://feeds.transistor.fm/saas-breakthrough", "saas marketing b2b growth sales"), # SaaS Breakthrough
-        # Business, Marketing & Finance
-        ("https://feeds.feedburner.com/entrepreneuronfire", "entrepreneur business sales founder marketing"), # EOFire
-        ("https://rss.art19.com/how-i-built-this-with-guy-raz", "business founder stories startup growth"), # How I Built This
-        ("https://feeds.megaphone.fm/hubspot-marketing-against-the-grain", "marketing growth b2b media"), # Marketing Against The Grain
-        ("https://feed.podbean.com/theinvestorspodcast/feed.xml", "investing finance money capital crypto"), # We Study Billionaires
-        # Health & Mindset
-        ("https://feeds.megaphone.fm/hubermanlab", "health science biohacking fitness neuroscience"), # Huberman Lab
-        ("https://feeds.megaphone.fm/timferriss", "productivity business health tech lifestyle") # Tim Ferriss
+        ("https://feeds.simplecast.com/54nAGcIl", "tech saas startup software ai devops cloud"),
+        ("https://feeds.megaphone.fm/recodedecode", "tech media venture business saas"),
+        ("https://softwareengineeringdaily.com/feed/podcast/", "engineering software architecture tech ai devops"),
+        ("https://feeds.transistor.fm/saas-breakthrough", "saas marketing b2b growth sales cloud"),
+        ("https://feeds.feedburner.com/entrepreneuronfire", "entrepreneur business sales founder marketing startup"),
+        ("https://rss.art19.com/how-i-built-this-with-guy-raz", "business founder stories startup growth product"),
+        ("https://feeds.megaphone.fm/hubspot-marketing-against-the-grain", "marketing growth b2b media saas ai"),
+        ("https://feed.podbean.com/theinvestorspodcast/feed.xml", "investing finance money capital crypto venture"),
+        ("https://feeds.megaphone.fm/hubermanlab", "health science biohacking fitness neuroscience"),
+        ("https://feeds.megaphone.fm/timferriss", "productivity business health tech lifestyle founder")
     ]
 
+    niche_lower = niche.lower()
     scraper.log(f"Scanning open RSS feeds and platform directories matching '{niche}'...")
     
     matched_feeds = []
@@ -375,18 +584,19 @@ def run_discovery_pipeline(client_id, niche, min_subs=1000, target_count=5):
             matched_feeds.append(feed_url)
 
     if not matched_feeds:
-        # Default to top business & tech feeds if niche is broad
         matched_feeds = [sample_feeds[0][0], sample_feeds[3][0], sample_feeds[4][0]]
 
+    staged_results = []
     for feed_url in matched_feeds[:target_count]:
         scraper.log(f"Connecting to RSS feed endpoint: {feed_url}")
-        time.sleep(0.3) # Courtesy throttle
-        lead = scraper.parse_rss_feed(feed_url, client_id, niche, min_subs=min_subs)
+        time.sleep(0.3)
+        lead = scraper.parse_rss_feed(feed_url, client_id, niche, min_subs=min_subs, stage_immediately=stage_only)
         if lead:
-            discovered_leads.append(lead)
+            staged_results.append(lead)
 
-    scraper.log(f"Pipeline completed: {len(discovered_leads)} qualified leads stored in podconnect_leads.db")
-    return discovered_leads
+    action_label = "staged for validation & review" if stage_only else "stored in database"
+    scraper.log(f"Pipeline completed: {len(staged_results)} qualified leads {action_label}", level="SUCCESS")
+    return staged_results
 
 
 if __name__ == "__main__":
@@ -395,11 +605,15 @@ if __name__ == "__main__":
     parser.add_argument("--niche", default="B2B SaaS and Tech", help="Podcast Niche")
     parser.add_argument("--min-subs", type=int, default=1000, help="Minimum subscriber threshold")
     parser.add_argument("--limit", type=int, default=5, help="Lead count limit")
-    parser.add_argument("--dump-json", action="store_true", help="Print all leads as JSON")
+    parser.add_argument("--dump-json", action="store_true", help="Print all approved leads as JSON")
+    parser.add_argument("--dump-staged", action="store_true", help="Print all staged leads as JSON")
+    parser.add_argument("--direct-import", action="store_true", help="Bypass staging and import directly")
     args = parser.parse_args()
 
+    scraper = PodcastLeadScraper()
     if args.dump_json:
-        scraper = PodcastLeadScraper()
         print(json.dumps(scraper.get_leads(args.client)))
+    elif args.dump_staged:
+        print(json.dumps(scraper.get_staged_leads(args.client)))
     else:
-        run_discovery_pipeline(args.client, args.niche, args.min_subs, args.limit)
+        run_discovery_pipeline(args.client, args.niche, args.min_subs, args.limit, stage_only=not args.direct_import)

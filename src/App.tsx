@@ -1,19 +1,21 @@
 import React, { useState, useEffect } from 'react';
 import { Header } from './components/Header';
 import { Sidebar } from './components/Sidebar';
+import { ClientManagementView } from './components/clients/ClientManagementView';
 import { MasterDatabaseView } from './components/MasterDatabaseView';
 import { ClientOnboardingView } from './components/ClientOnboardingView';
 import { ScraperConsoleView } from './components/ScraperConsoleView';
 import { OutreachHubView } from './components/OutreachHubView';
 import { CalendarMilestonesView } from './components/CalendarMilestonesView';
+import { WorkspaceHubView } from './components/WorkspaceHubView';
 import { ConfirmationModal } from './components/ConfirmationModal';
 import { Client, Lead, WorkspaceAuthUser } from './types';
-import { initAuth, googleSignIn, logout } from './lib/firebase';
+import { initAuth, googleSignIn, logout, fetchClientsFromFirestore, saveClientToFirestore } from './lib/firebase';
 import { findOrCreateMasterSheet } from './lib/workspace';
-import { FileSpreadsheet, Search, Send, Calendar, PlusCircle } from 'lucide-react';
+import { FileSpreadsheet, Search, Send, Calendar, PlusCircle, Users } from 'lucide-react';
 
 export default function App() {
-  const [currentView, setCurrentView] = useState<string>('database');
+  const [currentView, setCurrentView] = useState<string>('clients');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState<boolean>(false);
 
   // Initial client record to ensure immediate operational populated state
@@ -29,7 +31,26 @@ export default function App() {
       contractDays: 120,
       startDate: '2026-10-24',
       endDate: '2027-02-21',
+      stage: 'Lead Sourcing',
       status: 'Active',
+      orderNumber: 'ORD-2026-C001',
+      targetPlacements: 10,
+      bookedPlacements: 1,
+      stageHistory: [
+        {
+          fromStage: 'Onboarding',
+          toStage: 'Scoping',
+          timestamp: '2026-10-24T08:00:00.000Z',
+          note: 'Agreement parsed, deliverables approved by operations lead.',
+        },
+        {
+          fromStage: 'Scoping',
+          toStage: 'Lead Sourcing',
+          timestamp: '2026-10-24T09:00:00.000Z',
+          note: 'Requirements document generated; keyword dorks initialized.',
+        },
+      ],
+
       messagePillars: [
         'Why AI agents will replace traditional SaaS dashboards by 2027',
         'How to scale vector databases to 100M+ queries with zero downtime',
@@ -81,6 +102,7 @@ export default function App() {
   // Authentication State
   const [authUser, setAuthUser] = useState<WorkspaceAuthUser | null>(null);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
   const [masterSheetUrl, setMasterSheetUrl] = useState<string | undefined>(undefined);
 
   // Confirmation Modal State (Mandatory for mutating Google Workspace actions)
@@ -103,13 +125,26 @@ export default function App() {
   // Initialize Firebase Auth listener on app load
   useEffect(() => {
     const unsubscribe = initAuth(
-      (user, _token) => {
+      async (user, _token) => {
         setAuthUser({
           displayName: user.displayName,
           email: user.email,
           photoURL: user.photoURL,
           uid: user.uid,
         });
+
+        // Sync with Cloud Firestore
+        try {
+          const cloudClients = await fetchClientsFromFirestore(user.uid);
+          if (cloudClients.length > 0) {
+            setClients(cloudClients);
+          } else {
+            // Seed initial client to Firestore for user
+            await saveClientToFirestore(clients[0], user.uid);
+          }
+        } catch (e) {
+          console.warn('Firestore client load deferred:', e);
+        }
       },
       () => {
         setAuthUser(null);
@@ -120,25 +155,47 @@ export default function App() {
 
   const handleSignIn = async () => {
     setIsLoggingIn(true);
+    setAuthError(null);
     try {
       const result = await googleSignIn();
-      if (result) {
-        setAuthUser({
-          displayName: result.user.displayName,
-          email: result.user.email,
-          photoURL: result.user.photoURL,
-          uid: result.user.uid,
-        });
+      if (!result) {
+        // User closed the popup window or canceled; return cleanly without error
+        return;
+      }
 
-        try {
-          const sheet = await findOrCreateMasterSheet();
-          setMasterSheetUrl(sheet.spreadsheetUrl);
-        } catch (e) {
-          console.warn('Master sheet discovery deferred:', e);
+      setAuthUser({
+        displayName: result.user.displayName,
+        email: result.user.email,
+        photoURL: result.user.photoURL,
+        uid: result.user.uid,
+      });
+
+      try {
+        const cloudClients = await fetchClientsFromFirestore(result.user.uid);
+        if (cloudClients.length > 0) {
+          setClients(cloudClients);
+        } else {
+          await saveClientToFirestore(clients[0], result.user.uid);
         }
+      } catch (e) {
+        console.warn('Firestore initial sync error:', e);
+      }
+
+      try {
+        const sheet = await findOrCreateMasterSheet();
+        setMasterSheetUrl(sheet.spreadsheetUrl);
+      } catch (e) {
+        console.warn('Master sheet discovery deferred:', e);
       }
     } catch (err: any) {
-      alert(`Google Workspace sign-in error: ${err.message}`);
+      if (
+        err?.code !== 'auth/popup-closed-by-user' &&
+        err?.code !== 'auth/cancelled-popup-request' &&
+        !err?.message?.includes('popup-closed-by-user') &&
+        !err?.message?.includes('cancelled-popup-request')
+      ) {
+        setAuthError(err?.message || 'Google Workspace sign-in failed. Please try again.');
+      }
     } finally {
       setIsLoggingIn(false);
     }
@@ -176,12 +233,24 @@ export default function App() {
     setClients((prev) => [newClient, ...prev]);
     setActiveClientId(newClient.id);
     setCurrentView('database');
+
+    if (authUser) {
+      saveClientToFirestore(newClient, authUser.uid).catch((err) =>
+        console.error('Failed to sync new client to Firestore:', err)
+      );
+    }
   };
 
   const handleClientUpdated = (updatedClient: Client) => {
     setClients((prev) =>
       prev.map((c) => (c.id === updatedClient.id ? updatedClient : c))
     );
+
+    if (authUser) {
+      saveClientToFirestore(updatedClient, authUser.uid).catch((err) =>
+        console.error('Failed to sync updated client to Firestore:', err)
+      );
+    }
   };
 
   const handleOpenPitchModal = (lead: Lead) => {
@@ -204,6 +273,21 @@ export default function App() {
         onToggleMobileMenu={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
       />
 
+      {authError && (
+        <div className="bg-rose-950/70 border-b border-rose-800 px-4 py-2 text-xs text-rose-200 flex items-center justify-between z-30">
+          <div className="flex items-center gap-2">
+            <span className="font-semibold text-rose-400">Authentication notice:</span>
+            <span>{authError}</span>
+          </div>
+          <button
+            onClick={() => setAuthError(null)}
+            className="text-rose-400 hover:text-white px-2 py-0.5 rounded hover:bg-rose-900/50 cursor-pointer text-xs"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       <div className="flex-1 flex overflow-hidden">
         {/* Responsive Workspace Sidebar & Mobile Drawer */}
         <Sidebar
@@ -219,20 +303,46 @@ export default function App() {
 
         {/* Main Content Viewport */}
         <main className="flex-1 overflow-y-auto p-4 sm:p-6 bg-[#090D16]">
+          {currentView === 'clients' && (
+            <ClientManagementView
+              clients={clients}
+              activeClientId={activeClientId}
+              onSelectClient={(id) => {
+                setActiveClientId(id);
+              }}
+              onClientUpdated={handleClientUpdated}
+              onNavigateToOnboarding={() => setCurrentView('onboarding')}
+              onNavigateToScraper={(id) => {
+                setActiveClientId(id);
+                setCurrentView('scraper');
+              }}
+              onNavigateToOutreach={(id) => {
+                setActiveClientId(id);
+                setCurrentView('outreach');
+              }}
+              onRequestConfirmation={handleRequestConfirmation}
+              isAuthenticated={!!authUser}
+              onSignIn={handleSignIn}
+              masterSheetUrl={masterSheetUrl}
+            />
+          )}
+
           {currentView === 'database' && (
             <MasterDatabaseView
               clients={clients}
               masterSheetUrl={masterSheetUrl}
               onSelectClient={(id) => {
                 setActiveClientId(id);
-                setCurrentView('milestones');
+                setCurrentView('clients');
               }}
               onNavigateToOnboarding={() => setCurrentView('onboarding')}
+              onNavigateToPipeline={() => setCurrentView('clients')}
               onRequestConfirmation={handleRequestConfirmation}
               isAuthenticated={!!authUser}
               onSignIn={handleSignIn}
             />
           )}
+
 
           {currentView === 'onboarding' && (
             <ClientOnboardingView
@@ -278,12 +388,24 @@ export default function App() {
               onSignIn={handleSignIn}
             />
           )}
+
+          {currentView === 'workspace' && (
+            <WorkspaceHubView
+              clients={clients}
+              activeClientId={activeClientId}
+              masterSheetUrl={masterSheetUrl}
+              isAuthenticated={!!authUser}
+              onSignIn={handleSignIn}
+              onRequestConfirmation={handleRequestConfirmation}
+            />
+          )}
         </main>
       </div>
 
       {/* Mobile Bottom Tab Bar for Quick Ergonomic Navigation (Height <= 54px, < 10% mobile viewport) */}
       <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-slate-950/95 backdrop-blur-md border-t border-slate-800 flex items-center justify-around px-2 py-1.5 h-14">
         {[
+          { id: 'clients', label: 'Clients', icon: Users },
           { id: 'database', label: 'Database', icon: FileSpreadsheet },
           { id: 'onboarding', label: 'Onboard', icon: PlusCircle },
           { id: 'scraper', label: 'Scrape', icon: Search },
@@ -306,6 +428,7 @@ export default function App() {
           );
         })}
       </nav>
+
 
       {/* Mandatory User Confirmation Modal for Workspace Mutations */}
       <ConfirmationModal

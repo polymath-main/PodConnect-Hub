@@ -19,8 +19,16 @@ export interface Client {
   contractDays: number;
   startDate: string;
   endDate: string;
-  status: 'Onboarding' | 'Active' | 'Review' | 'Completed';
+  stage?: ClientStage;
+  status: ClientStatus;
+  orderNumber?: string;
+  targetPlacements?: number;
+  bookedPlacements?: number;
+  cancellationDetails?: CancellationDetails;
+  stageHistory?: StageHistoryEntry[];
+  icp?: ClientICP;
   messagePillars: string[];
+
   credibilityAssets: string[];
   samplePitchAngle?: string;
   milestones: Milestone[];
@@ -35,6 +43,50 @@ export interface Client {
   lastSyncedAt?: string;
 }
 
+export type ClientStage =
+  | 'Onboarding'
+  | 'Scoping'
+  | 'Lead Sourcing'
+  | 'Outreach Active'
+  | 'Interview Scheduled'
+  | 'Completed'
+  | 'Paused'
+  | 'Cancelled';
+
+export type ClientStatus = 'Active' | 'Paused' | 'Cancelled' | 'Completed' | 'Onboarding' | 'Review';
+
+export interface CancellationDetails {
+  reason: string;
+  cancelledAt: string;
+  settlementType: 'Full Refund' | 'Partial Settlement' | 'Retained as Credit' | 'Non-Refundable (Delivered)' | 'No Settlement Required';
+  settlementAmount?: string;
+  notes?: string;
+  archiveCalendarEvents?: boolean;
+  cancelledBy?: string;
+}
+
+export interface StageHistoryEntry {
+  fromStage: ClientStage;
+  toStage: ClientStage;
+  timestamp: string;
+  note?: string;
+}
+
+export type LeadStatus =
+  | 'Staged'
+  | 'Imported'
+  | 'New'
+  | 'Pitch Drafted'
+  | 'Contacted'
+  | 'Sent'
+  | 'Dispatched'
+  | 'Replied'
+  | 'Responded'
+  | 'Converted'
+  | 'Booked'
+  | 'Archived'
+  | 'Passed';
+
 export interface Lead {
   id: number;
   clientId: string;
@@ -46,10 +98,41 @@ export interface Lead {
   email: string;
   subscribers: number;
   niche: string;
+  tags?: string[];
   score: number;
-  status: 'New' | 'Pitch Drafted' | 'Sent' | 'Dispatched' | 'Responded' | 'Booked' | 'Passed';
+  status: LeadStatus;
   dateAdded: string;
+  notes?: string;
+  location?: string;
+  pitchDraft?: PitchDraft;
 }
+
+export interface StagedLead {
+  id: number;
+  clientId: string;
+  showName: string;
+  hostName: string;
+  platform: string;
+  showUrl: string;
+  feedUrl?: string;
+  email: string;
+  subscribers: number;
+  niche: string;
+  tags: string[];
+  score: number;
+  location?: string;
+  notes?: string;
+  dateScraped: string;
+  selected?: boolean;
+}
+
+export interface ClientICP {
+  targetGeos?: string[];
+  audienceFloor?: number;
+  keywords?: string[];
+  targetPlatforms?: string[];
+}
+
 
 export interface ScrapeLog {
   id?: string;

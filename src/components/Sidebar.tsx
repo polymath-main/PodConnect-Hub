@@ -8,6 +8,8 @@ import {
   Layers,
   ExternalLink,
   X,
+  HardDrive,
+  Users,
 } from 'lucide-react';
 import { Client } from '../types';
 
@@ -33,12 +35,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onCloseMobile,
 }) => {
   const navItems = [
+    { id: 'clients', label: 'Client Management & Staging', icon: Users },
     { id: 'database', label: 'Master Database', icon: FileSpreadsheet },
     { id: 'onboarding', label: 'Client Onboarding', icon: PlusCircle },
     { id: 'scraper', label: 'Lead Sourcing & Scraping', icon: Search },
     { id: 'outreach', label: 'Outreach & Pitch Hub', icon: Send },
     { id: 'milestones', label: 'Calendar Milestones', icon: Calendar },
+    { id: 'workspace', label: 'Google Workspace Hub', icon: HardDrive },
   ];
+
 
   const handleNavClick = (id: string) => {
     onNavigate(id);
@@ -141,13 +146,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     </div>
                     <span
                       className={`w-2 h-2 rounded-full shrink-0 ${
-                        client.status === 'Active'
+                        client.status === 'Cancelled'
+                          ? 'bg-rose-500'
+                          : client.status === 'Paused'
+                          ? 'bg-amber-500'
+                          : client.status === 'Active' || client.stage === 'Interview Scheduled' || client.stage === 'Outreach Active'
                           ? 'bg-emerald-500'
-                          : client.status === 'Onboarding'
-                          ? 'bg-sky-500'
-                          : 'bg-amber-500'
+                          : 'bg-sky-500'
                       }`}
                     />
+
                   </button>
                 );
               })}

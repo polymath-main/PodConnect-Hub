@@ -57,7 +57,7 @@ export const CalendarMilestonesView: React.FC<CalendarMilestonesViewProps> = ({
     }
 
     if (!activeClient || !activeClient.milestones || activeClient.milestones.length === 0) {
-      alert('No milestones configured for this client.');
+      setFeedback('No milestones configured for this client.');
       return;
     }
 

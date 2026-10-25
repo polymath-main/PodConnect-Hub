@@ -1,0 +1,196 @@
+{
+  "entities": {
+    "Client": {
+      "title": "Client",
+      "description": "Enterprise podcast marketing client profile",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "platform": {
+          "type": "string",
+          "maxLength": 50
+        },
+        "niche": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "package": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "pricing": {
+          "type": "string",
+          "maxLength": 50
+        },
+        "timelineStart": {
+          "type": "string",
+          "maxLength": 30
+        },
+        "timelineEnd": {
+          "type": "string",
+          "maxLength": 30
+        },
+        "status": {
+          "type": "string",
+          "enum": ["Active", "Onboarding", "Completed"]
+        },
+        "conversationDocUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "requirementsDocUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "outreachStrategyDocUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "masterSheetUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "userId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "required": ["id", "name", "niche", "package", "userId", "createdAt"]
+    },
+    "Lead": {
+      "title": "Lead",
+      "description": "Scraped and vetted podcast lead",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "clientId": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "showName": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "hostName": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "platform": {
+          "type": "string",
+          "maxLength": 50
+        },
+        "showUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "email": {
+          "type": "string",
+          "maxLength": 150
+        },
+        "subscribers": {
+          "type": "number"
+        },
+        "niche": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "score": {
+          "type": "number"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["New", "Vetted", "Pitch Drafted", "Sent", "Responded", "Booked"]
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "dateAdded": {
+          "type": "string"
+        },
+        "userId": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "required": ["id", "clientId", "showName", "platform", "niche", "userId", "dateAdded"]
+    },
+    "Milestone": {
+      "title": "Milestone",
+      "description": "Campaign contract timeline milestone",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "clientId": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "phase": {
+          "type": "number"
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "targetDate": {
+          "type": "string",
+          "maxLength": 30
+        },
+        "completed": {
+          "type": "boolean"
+        },
+        "calendarEventUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "userId": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "required": ["id", "clientId", "phase", "title", "targetDate", "completed", "userId"]
+    }
+  },
+  "firestore": {
+    "/clients/{clientId}": {
+      "schema": "Client",
+      "description": "Master client database records per user"
+    },
+    "/leads/{leadId}": {
+      "schema": "Lead",
+      "description": "Persistent podcast leads discovered and managed"
+    },
+    "/milestones/{milestoneId}": {
+      "schema": "Milestone",
+      "description": "Automated schedule milestones per campaign"
+    }
+  }
+}

@@ -1,0 +1,518 @@
+import React, { useState } from 'react';
+import {
+  X,
+  ExternalLink,
+  Calendar,
+  FileSpreadsheet,
+  FileText,
+  CheckCircle2,
+  Clock,
+  ArrowRight,
+  TrendingUp,
+  Target,
+  DollarSign,
+  Layers,
+  Sparkles,
+  Ban,
+  PauseCircle,
+  PlayCircle,
+  Search,
+  Send,
+} from 'lucide-react';
+import { Client, ClientStage } from '../../types';
+
+interface ClientDetailDrawerProps {
+  client: Client | null;
+  isOpen: boolean;
+  onClose: () => void;
+  onStageChange: (client: Client, newStage: ClientStage, note?: string) => Promise<void>;
+  onOpenCancelModal: (client: Client) => void;
+  onTogglePause: (client: Client) => Promise<void>;
+  onNavigateToScraper: (clientId: string) => void;
+  onNavigateToOutreach: (clientId: string) => void;
+}
+
+const STAGES_PIPELINE: ClientStage[] = [
+  'Onboarding',
+  'Scoping',
+  'Lead Sourcing',
+  'Outreach Active',
+  'Interview Scheduled',
+  'Completed',
+];
+
+export const ClientDetailDrawer: React.FC<ClientDetailDrawerProps> = ({
+  client,
+  isOpen,
+  onClose,
+  onStageChange,
+  onOpenCancelModal,
+  onTogglePause,
+  onNavigateToScraper,
+  onNavigateToOutreach,
+}) => {
+  if (!isOpen || !client) return null;
+
+  const [activeTab, setActiveTab] = useState<'overview' | 'deliverables' | 'history'>('overview');
+  const [transitionNote, setTransitionNote] = useState('');
+  const [isUpdatingStage, setIsUpdatingStage] = useState(false);
+
+  const currentStage = client.stage || 'Onboarding';
+  const isCancelled = client.status === 'Cancelled' || currentStage === 'Cancelled';
+  const isPaused = client.status === 'Paused' || currentStage === 'Paused';
+
+  // Calculate timeline progress
+  const start = new Date(client.startDate).getTime();
+  const end = new Date(client.endDate).getTime();
+  const now = Date.now();
+  const totalDays = Math.max(1, Math.round((end - start) / (1000 * 60 * 60 * 24)));
+  const daysElapsed = Math.max(0, Math.round((now - start) / (1000 * 60 * 60 * 24)));
+  const progressPercent = Math.min(100, Math.max(0, Math.round((daysElapsed / totalDays) * 100)));
+
+  const handleAdvanceStage = async (nextStage: ClientStage) => {
+    setIsUpdatingStage(true);
+    try {
+      await onStageChange(client, nextStage, transitionNote || `Manual progression to ${nextStage}`);
+      setTransitionNote('');
+    } finally {
+      setIsUpdatingStage(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-xs">
+      <div className="relative w-full max-w-2xl bg-slate-900 border-l border-slate-800 h-full shadow-2xl flex flex-col text-xs animate-in slide-in-from-right duration-200">
+        {/* Drawer Header */}
+        <div className="p-4 sm:p-5 border-b border-slate-800 bg-slate-950/80 flex items-center justify-between">
+          <div className="flex items-center gap-3 truncate">
+            <span className="font-mono text-xs font-bold text-indigo-400 bg-indigo-500/10 border border-indigo-500/20 px-2 py-1 rounded">
+              {client.id}
+            </span>
+            <div className="truncate">
+              <h2 className="text-base font-bold text-white truncate">{client.name}</h2>
+              <div className="flex items-center gap-2 text-slate-400 text-[11px]">
+                <span className="truncate">{client.niche}</span>
+                <span>•</span>
+                <span className="font-mono">{client.orderNumber || `ORD-2026-${client.id}`}</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={onClose}
+              className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+        </div>
+
+        {/* Status / Alert Banner if Cancelled or Paused */}
+        {isCancelled && (
+          <div className="bg-rose-950/40 border-b border-rose-900/60 p-3 sm:px-5 flex items-start gap-3 text-rose-200">
+            <Ban className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            <div>
+              <span className="font-semibold text-rose-300">Order Cancelled:</span>{' '}
+              {client.cancellationDetails?.reason || 'Contract terminated'}
+              {client.cancellationDetails?.settlementType && (
+                <div className="text-[11px] text-rose-300/80 mt-0.5">
+                  Settlement: {client.cancellationDetails.settlementType}
+                  {client.cancellationDetails.settlementAmount ? ` (${client.cancellationDetails.settlementAmount})` : ''}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {isPaused && (
+          <div className="bg-amber-950/40 border-b border-amber-900/60 p-3 sm:px-5 flex items-center justify-between text-amber-200">
+            <div className="flex items-center gap-2">
+              <PauseCircle className="w-4 h-4 text-amber-400 shrink-0" />
+              <span>Campaign currently paused upon client request.</span>
+            </div>
+            <button
+              onClick={() => onTogglePause(client)}
+              className="text-xs font-semibold text-amber-300 hover:text-white bg-amber-900/40 px-2.5 py-1 rounded border border-amber-700/60 cursor-pointer"
+            >
+              Resume Campaign
+            </button>
+          </div>
+        )}
+
+        {/* Tab Controls (Zero-Pill segmented tabs) */}
+        <div className="flex items-center gap-1 px-4 py-2 bg-slate-950/50 border-b border-slate-800 text-xs">
+          {[
+            { id: 'overview', label: 'Process & Stages' },
+            { id: 'deliverables', label: 'Deliverables & Docs' },
+            { id: 'history', label: 'Audit Trail & Logs' },
+          ].map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id as any)}
+              className={`px-3 py-1.5 font-medium rounded-md transition-colors cursor-pointer ${
+                activeTab === tab.id
+                  ? 'bg-slate-800 text-white font-semibold'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Drawer Body Area */}
+        <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-5">
+          {/* TAB 1: OVERVIEW & STAGING PIPELINE */}
+          {activeTab === 'overview' && (
+            <div className="space-y-5">
+              {/* Timeline & Contract Metrics */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 p-3.5 bg-slate-950/60 border border-slate-800 rounded-xl">
+                <div>
+                  <span className="text-[10px] text-slate-500 uppercase block font-semibold">Package</span>
+                  <span className="text-white font-medium truncate block">{client.package}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-500 uppercase block font-semibold">Agreed Pricing</span>
+                  <span className="text-emerald-400 font-mono font-semibold">{client.pricing}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-500 uppercase block font-semibold">Contract Timeline</span>
+                  <span className="text-slate-200 font-mono tabular-nums">
+                    {client.contractDays || totalDays} Days ({daysElapsed}d elapsed)
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-500 uppercase block font-semibold">Min Audience</span>
+                  <span className="text-indigo-400 font-mono tabular-nums">
+                    $\ge$ {(client.minSubscribers || 1000).toLocaleString()} subs
+                  </span>
+                </div>
+              </div>
+
+              {/* Progress Bar */}
+              <div className="space-y-1.5">
+                <div className="flex justify-between text-[11px] text-slate-400">
+                  <span>Contract Schedule Progress</span>
+                  <span className="font-mono text-slate-200">{progressPercent}%</span>
+                </div>
+                <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full transition-all duration-300 ${
+                      isCancelled ? 'bg-rose-500' : isPaused ? 'bg-amber-500' : 'bg-indigo-500'
+                    }`}
+                    style={{ width: `${progressPercent}%` }}
+                  />
+                </div>
+                <div className="flex justify-between text-[10px] text-slate-500 font-mono">
+                  <span>Start: {client.startDate}</span>
+                  <span>End: {client.endDate}</span>
+                </div>
+              </div>
+
+              {/* Interactive Staging Stepper */}
+              <div className="space-y-3 pt-2">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                    Staging Automation Pipeline
+                  </h3>
+                  <span className="font-mono text-[11px] text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded border border-indigo-500/20">
+                    Current: {currentStage}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  {STAGES_PIPELINE.map((stg, idx) => {
+                    const isCurrent = currentStage === stg;
+                    const isPassed =
+                      STAGES_PIPELINE.indexOf(currentStage) > idx && !isCancelled;
+
+                    return (
+                      <button
+                        key={stg}
+                        disabled={isCancelled || isUpdatingStage}
+                        onClick={() => handleAdvanceStage(stg)}
+                        className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer ${
+                          isCurrent
+                            ? 'bg-indigo-600/20 border-indigo-500 text-white font-semibold'
+                            : isPassed
+                            ? 'bg-slate-950/60 border-slate-800/80 text-emerald-400'
+                            : 'bg-slate-950/30 border-slate-800/40 text-slate-500 hover:text-slate-300 hover:border-slate-700'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-[10px] font-mono text-slate-500">Stage 0{idx + 1}</span>
+                          {isPassed ? (
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                          ) : isCurrent ? (
+                            <span className="w-2 h-2 rounded-full bg-indigo-400 animate-pulse" />
+                          ) : (
+                            <Clock className="w-3.5 h-3.5 text-slate-600" />
+                          )}
+                        </div>
+                        <span className="text-xs truncate block">{stg}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Staging Shortcuts & Actions Strip */}
+              <div className="p-3.5 bg-slate-950/60 border border-slate-800 rounded-xl space-y-3">
+                <span className="text-[10px] text-slate-400 uppercase font-semibold block">
+                  Quick Pipeline Operations
+                </span>
+
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={() => onNavigateToScraper(client.id)}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg font-medium transition-colors cursor-pointer"
+                  >
+                    <Search className="w-3.5 h-3.5 text-sky-400" />
+                    <span>Launch Lead Scraper</span>
+                  </button>
+
+                  <button
+                    onClick={() => onNavigateToOutreach(client.id)}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg font-medium transition-colors cursor-pointer"
+                  >
+                    <Send className="w-3.5 h-3.5 text-indigo-400" />
+                    <span>Launch Outreach Hub</span>
+                  </button>
+
+                  {!isCancelled && (
+                    <button
+                      onClick={() => onTogglePause(client)}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-amber-300 rounded-lg font-medium transition-colors cursor-pointer"
+                    >
+                      {isPaused ? <PlayCircle className="w-3.5 h-3.5" /> : <PauseCircle className="w-3.5 h-3.5" />}
+                      <span>{isPaused ? 'Resume Campaign' : 'Pause Campaign'}</span>
+                    </button>
+                  )}
+
+                  {!isCancelled && (
+                    <button
+                      onClick={() => onOpenCancelModal(client)}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800 text-rose-300 hover:text-white rounded-lg font-medium transition-colors cursor-pointer"
+                    >
+                      <Ban className="w-3.5 h-3.5 text-rose-400" />
+                      <span>Cancel Order</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Milestones Tracking Checklist */}
+              <div className="space-y-2">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                  Project Milestones & Deliverables
+                </h3>
+                <div className="divide-y divide-slate-800/80 bg-slate-950/40 border border-slate-800 rounded-xl overflow-hidden">
+                  {client.milestones?.map((m, i) => (
+                    <div key={i} className="p-3 flex items-center justify-between">
+                      <div className="flex items-center gap-2.5">
+                        <CheckCircle2
+                          className={`w-4 h-4 shrink-0 ${
+                            m.completed ? 'text-emerald-400' : 'text-slate-600'
+                          }`}
+                        />
+                        <div>
+                          <span className={`font-medium ${m.completed ? 'text-slate-200' : 'text-slate-300'}`}>
+                            {m.title}
+                          </span>
+                          <span className="text-[10px] text-slate-500 block font-mono">
+                            Due: {m.dueDate} (Day {m.dayOffset})
+                          </span>
+                        </div>
+                      </div>
+
+                      {m.calendarLink && (
+                        <a
+                          href={m.calendarLink}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="p-1.5 text-slate-400 hover:text-indigo-300 transition-colors"
+                          title="Open in Google Calendar"
+                        >
+                          <Calendar className="w-3.5 h-3.5" />
+                        </a>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 2: DELIVERABLES & GOOGLE DOCS */}
+          {activeTab === 'deliverables' && (
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <span className="text-[10px] text-slate-400 uppercase font-semibold block">
+                  Synchronized Google Workspace Assets
+                </span>
+                <div className="space-y-2">
+                  <div className="p-3 bg-slate-950/60 border border-slate-800 rounded-lg flex items-center justify-between">
+                    <div className="flex items-center gap-2.5 truncate">
+                      <FileText className="w-4 h-4 text-indigo-400 shrink-0" />
+                      <div className="truncate">
+                        <span className="font-semibold text-white block truncate">
+                          {client.docs.requirementsDocTitle || `Client_Requirements_${client.name}`}
+                        </span>
+                        <span className="text-[11px] text-slate-500">Core message pillars & credibility assets</span>
+                      </div>
+                    </div>
+                    {client.docs.requirementsDocUrl ? (
+                      <a
+                        href={client.docs.requirementsDocUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-indigo-300 rounded text-xs flex items-center gap-1"
+                      >
+                        <span>Open Doc</span>
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                    ) : (
+                      <span className="text-[11px] text-amber-500">Not generated yet</span>
+                    )}
+                  </div>
+
+                  <div className="p-3 bg-slate-950/60 border border-slate-800 rounded-lg flex items-center justify-between">
+                    <div className="flex items-center gap-2.5 truncate">
+                      <FileText className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <div className="truncate">
+                        <span className="font-semibold text-white block truncate">
+                          {client.docs.conversationExportTitle || `Conversation_Export_${client.name}`}
+                        </span>
+                        <span className="text-[11px] text-slate-500">Archived agreement chat transcript</span>
+                      </div>
+                    </div>
+                    {client.docs.conversationExportUrl ? (
+                      <a
+                        href={client.docs.conversationExportUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-emerald-300 rounded text-xs flex items-center gap-1"
+                      >
+                        <span>Open Doc</span>
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                    ) : (
+                      <span className="text-[11px] text-amber-500">Not generated yet</span>
+                    )}
+                  </div>
+
+                  <div className="p-3 bg-slate-950/60 border border-slate-800 rounded-lg flex items-center justify-between">
+                    <div className="flex items-center gap-2.5 truncate">
+                      <FileText className="w-4 h-4 text-purple-400 shrink-0" />
+                      <div className="truncate">
+                        <span className="font-semibold text-white block truncate">
+                          {client.docs.outreachStrategyDocTitle || `Outreach_Strategy_${client.name}`}
+                        </span>
+                        <span className="text-[11px] text-slate-500">Pitch templates & host target roster</span>
+                      </div>
+                    </div>
+                    {client.docs.outreachStrategyDocUrl ? (
+                      <a
+                        href={client.docs.outreachStrategyDocUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-purple-300 rounded text-xs flex items-center gap-1"
+                      >
+                        <span>Open Doc</span>
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                    ) : (
+                      <span className="text-[11px] text-slate-500">Will generate upon outreach dispatch</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Message Pillars */}
+              <div className="space-y-2">
+                <span className="text-[10px] text-slate-400 uppercase font-semibold block">
+                  Thought Leadership Message Pillars
+                </span>
+                <ul className="space-y-1.5 p-3 bg-slate-950/60 border border-slate-800 rounded-lg list-disc list-inside text-slate-300">
+                  {client.messagePillars?.map((p, i) => (
+                    <li key={i} className="leading-relaxed">
+                      {p}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              {/* Credibility Assets */}
+              <div className="space-y-2">
+                <span className="text-[10px] text-slate-400 uppercase font-semibold block">
+                  Credibility Assets & Proof Points
+                </span>
+                <ul className="space-y-1.5 p-3 bg-slate-950/60 border border-slate-800 rounded-lg list-disc list-inside text-slate-300">
+                  {client.credibilityAssets?.map((c, i) => (
+                    <li key={i} className="leading-relaxed">
+                      {c}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 3: AUDIT TRAIL & STAGE HISTORY */}
+          {activeTab === 'history' && (
+            <div className="space-y-3">
+              <span className="text-[10px] text-slate-400 uppercase font-semibold block">
+                Stage Transition Audit Log
+              </span>
+
+              {(!client.stageHistory || client.stageHistory.length === 0) ? (
+                <div className="p-6 text-center text-slate-500 bg-slate-950/40 border border-slate-800 rounded-lg">
+                  <Clock className="w-5 h-5 mx-auto mb-1 text-slate-600" />
+                  <p>Initial client ingestion recorded on {client.startDate}.</p>
+                  <p className="text-[11px] text-slate-600 mt-0.5">
+                    Future stage transitions and order status changes will be logged here.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {client.stageHistory.map((hist, idx) => (
+                    <div
+                      key={idx}
+                      className="p-3 bg-slate-950/60 border border-slate-800 rounded-lg flex items-start justify-between gap-3"
+                    >
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-slate-400">{hist.fromStage}</span>
+                          <ArrowRight className="w-3 h-3 text-slate-600" />
+                          <span className="font-semibold text-indigo-400">{hist.toStage}</span>
+                        </div>
+                        {hist.note && <p className="text-slate-300 text-[11px]">{hist.note}</p>}
+                      </div>
+                      <span className="font-mono text-[10px] text-slate-500 whitespace-nowrap">
+                        {new Date(hist.timestamp).toLocaleString()}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Drawer Footer */}
+        <div className="p-4 border-t border-slate-800 bg-slate-950/80 flex items-center justify-between">
+          <div className="text-[11px] text-slate-500">
+            Last synced: {client.lastSyncedAt ? new Date(client.lastSyncedAt).toLocaleTimeString() : 'Live'}
+          </div>
+          <button
+            onClick={onClose}
+            className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg font-medium transition-colors cursor-pointer"
+          >
+            Close Inspector
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};

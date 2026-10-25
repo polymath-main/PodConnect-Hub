@@ -73,6 +73,7 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
   const [isSendingEmail, setIsSendingEmail] = useState(false);
   const [sendSuccessMessage, setSendSuccessMessage] = useState<string | null>(null);
   const [bookingToast, setBookingToast] = useState<{ showName: string; milestoneTitle: string } | null>(null);
+  const [outreachError, setOutreachError] = useState<string | null>(null);
   const [mobilePitchViewActive, setMobilePitchViewActive] = useState<boolean>(false);
 
   // Batch Queue State
@@ -172,37 +173,71 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
         setCurrentLeadForPitch((prev) => (prev ? { ...prev, status: newStatus as any } : null));
       }
 
-      // Automated Milestone Update if outreach results in a successful booking
-      if (newStatus === 'Booked' && activeClient && activeClient.milestones?.length > 0) {
-        // Find milestone corresponding to recorded/published interviews
-        const milestoneIndex = activeClient.milestones.findIndex(
-          (m) =>
-            m.title.toLowerCase().includes('publish') ||
-            m.title.toLowerCase().includes('interview') ||
-            m.title.toLowerCase().includes('placement') ||
-            m.dayOffset === 60
-        );
+      if (activeClient) {
+        let newStage = activeClient.stage;
+        let newBookedPlacements = activeClient.bookedPlacements || 0;
 
-        const targetIndex = milestoneIndex !== -1 ? milestoneIndex : 1; // Default to Phase 2 (Day 60)
-        const targetMilestone = activeClient.milestones[targetIndex];
+        if (newStatus === 'Sent' || newStatus === 'Dispatched' || newStatus === 'Contacted') {
+          if (activeClient.stage === 'Lead Sourcing' || activeClient.stage === 'Onboarding') {
+            newStage = 'Outreach Active';
+          }
+        } else if (newStatus === 'Booked' || newStatus === 'Converted') {
+          newBookedPlacements = (activeClient.bookedPlacements || 0) + 1;
+          const target = activeClient.targetPlacements || 4;
+          if (newBookedPlacements >= target) {
+            newStage = 'Completed';
+          } else {
+            newStage = 'Interview Scheduled';
+          }
+        }
 
-        if (targetMilestone) {
-          const updatedMilestones = [...activeClient.milestones];
-          updatedMilestones[targetIndex] = {
-            ...targetMilestone,
-            completed: true,
-          };
+        // Automated Milestone Update if outreach results in a successful booking
+        const updatedMilestones = [...(activeClient.milestones || [])];
+        if (newStatus === 'Booked' && updatedMilestones.length > 0) {
+          const milestoneIndex = updatedMilestones.findIndex(
+            (m) =>
+              m.title.toLowerCase().includes('publish') ||
+              m.title.toLowerCase().includes('interview') ||
+              m.title.toLowerCase().includes('placement') ||
+              m.dayOffset === 60
+          );
+          const targetIndex = milestoneIndex !== -1 ? milestoneIndex : 1;
+          if (updatedMilestones[targetIndex]) {
+            updatedMilestones[targetIndex] = {
+              ...updatedMilestones[targetIndex],
+              completed: true,
+            };
+            setBookingToast({
+              showName: lead.showName,
+              milestoneTitle: updatedMilestones[targetIndex].title,
+            });
+          }
+        }
+
+        if (
+          newStage !== activeClient.stage ||
+          newBookedPlacements !== activeClient.bookedPlacements ||
+          newStatus === 'Booked'
+        ) {
+          const stageHistory = activeClient.stageHistory || [];
+          if (newStage !== activeClient.stage && newStage) {
+            stageHistory.push({
+              fromStage: activeClient.stage || 'Onboarding',
+              toStage: newStage,
+              timestamp: new Date().toISOString(),
+              note: `Automated sync: Lead "${lead.showName}" marked as ${newStatus}`,
+            });
+          }
 
           const updatedClient: Client = {
             ...activeClient,
+            stage: newStage,
+            bookedPlacements: newBookedPlacements,
             milestones: updatedMilestones,
+            stageHistory,
           };
 
           onClientUpdated(updatedClient);
-          setBookingToast({
-            showName: lead.showName,
-            milestoneTitle: targetMilestone.title,
-          });
         }
       }
     } catch (err) {
@@ -242,7 +277,7 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
       });
       handleUpdateLeadStatus(lead, 'Pitch Drafted');
     } catch (err: any) {
-      alert(`Error generating pitch: ${err.message}`);
+      setOutreachError(`Error generating pitch: ${err.message}`);
     } finally {
       setIsGeneratingPitch(false);
     }
@@ -257,7 +292,7 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
     if (!pitchDraft) return;
 
     if (!pitchDraft.recipientEmail) {
-      alert('Please provide a recipient email address for this host.');
+      setOutreachError('Please provide a recipient email address for this host.');
       return;
     }
 
@@ -403,7 +438,7 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
     }
 
     if (!activeClient) {
-      alert('Please select an active client first.');
+      setOutreachError('Please select an active client first.');
       return;
     }
 
@@ -413,7 +448,7 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
         : leads;
 
     if (targetLeads.length === 0) {
-      alert('No leads available to export into Outreach Strategy doc.');
+      setOutreachError('No leads available to export into Outreach Strategy doc.');
       return;
     }
 
@@ -465,7 +500,7 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
           onClientUpdated(updatedClient);
           setExportedDocResult({ url: docRes.documentUrl, title: docRes.title });
         } catch (err: any) {
-          alert(`Google Docs export failed: ${err.message}`);
+          setOutreachError(`Google Docs export failed: ${err.message}`);
         } finally {
           setIsExportingDocs(false);
         }
@@ -597,6 +632,22 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
           </div>
           <button
             onClick={() => setBookingToast(null)}
+            className="text-slate-400 hover:text-white p-1 cursor-pointer"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* Outreach Error Banner */}
+      {outreachError && (
+        <div className="p-3 bg-rose-500/15 border border-rose-500/30 rounded-xl text-xs text-rose-200 flex items-start justify-between gap-3 shadow-lg">
+          <div className="flex items-center gap-2">
+            <span className="font-semibold text-rose-400">Notice:</span>
+            <span>{outreachError}</span>
+          </div>
+          <button
+            onClick={() => setOutreachError(null)}
             className="text-slate-400 hover:text-white p-1 cursor-pointer"
           >
             ✕

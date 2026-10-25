@@ -31,6 +31,7 @@ interface MasterDatabaseViewProps {
   masterSheetUrl?: string;
   onSelectClient: (clientId: string) => void;
   onNavigateToOnboarding: () => void;
+  onNavigateToPipeline?: () => void;
   onRequestConfirmation: (options: {
     title: string;
     description: string;
@@ -46,10 +47,12 @@ export const MasterDatabaseView: React.FC<MasterDatabaseViewProps> = ({
   masterSheetUrl,
   onSelectClient,
   onNavigateToOnboarding,
+  onNavigateToPipeline,
   onRequestConfirmation,
   isAuthenticated,
   onSignIn,
 }) => {
+
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [isSyncing, setIsSyncing] = useState(false);
@@ -198,6 +201,16 @@ export const MasterDatabaseView: React.FC<MasterDatabaseViewProps> = ({
         </div>
 
         <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
+          {onNavigateToPipeline && (
+            <button
+              onClick={onNavigateToPipeline}
+              className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-200 hover:text-white bg-slate-800 hover:bg-slate-700 border border-slate-700/80 rounded-lg transition-colors cursor-pointer min-h-[38px]"
+            >
+              <Layers className="w-4 h-4 text-indigo-400 shrink-0" />
+              <span>Staging Pipeline</span>
+            </button>
+          )}
+
           {masterSheetUrl && (
             <a
               href={masterSheetUrl}
@@ -221,6 +234,7 @@ export const MasterDatabaseView: React.FC<MasterDatabaseViewProps> = ({
           </button>
         </div>
       </div>
+
 
       {syncFeedback && (
         <div className="p-3 bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 rounded-lg text-xs flex items-center justify-between">
@@ -344,7 +358,7 @@ export const MasterDatabaseView: React.FC<MasterDatabaseViewProps> = ({
 
         {/* Interactive Filter Tabs (Zero-Pill: Segmented Buttons, scrollable on mobile) */}
         <div className="flex items-center gap-1 p-1 bg-slate-900 border border-slate-800 rounded-lg overflow-x-auto">
-          {['all', 'active', 'onboarding', 'review', 'completed'].map((status) => (
+          {['all', 'active', 'onboarding', 'review', 'completed', 'paused', 'cancelled'].map((status) => (
             <button
               key={status}
               onClick={() => setStatusFilter(status)}
@@ -358,6 +372,7 @@ export const MasterDatabaseView: React.FC<MasterDatabaseViewProps> = ({
             </button>
           ))}
         </div>
+
       </div>
 
       {/* Main Records Container: Responsive Mobile Cards + Desktop Data Grid */}
@@ -396,13 +411,18 @@ export const MasterDatabaseView: React.FC<MasterDatabaseViewProps> = ({
                     <div className="flex items-center gap-1.5 text-xs">
                       <span
                         className={`w-2 h-2 rounded-full ${
-                          client.status === 'Active'
+                          client.status === 'Cancelled'
+                            ? 'bg-rose-500'
+                            : client.status === 'Paused'
+                            ? 'bg-amber-400'
+                            : client.status === 'Active'
                             ? 'bg-emerald-400'
                             : client.status === 'Onboarding'
                             ? 'bg-sky-400'
-                            : 'bg-amber-400'
+                            : 'bg-purple-400'
                         }`}
                       />
+
                       <span className="text-slate-300 font-medium">{client.status}</span>
                     </div>
                   </div>
@@ -500,13 +520,18 @@ export const MasterDatabaseView: React.FC<MasterDatabaseViewProps> = ({
                         <div className="flex items-center gap-1.5">
                           <span
                             className={`w-2 h-2 rounded-full ${
-                              client.status === 'Active'
+                              client.status === 'Cancelled'
+                                ? 'bg-rose-500'
+                                : client.status === 'Paused'
+                                ? 'bg-amber-400'
+                                : client.status === 'Active'
                                 ? 'bg-emerald-400'
                                 : client.status === 'Onboarding'
                                 ? 'bg-sky-400'
-                                : 'bg-amber-400'
+                                : 'bg-purple-400'
                             }`}
                           />
+
                           <span className="font-medium text-slate-200">{client.status}</span>
                         </div>
                       </td>

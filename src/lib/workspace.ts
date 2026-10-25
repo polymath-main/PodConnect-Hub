@@ -298,6 +298,70 @@ export async function syncClientToMasterSheet(
   return { updatedRange: appendRes.updates?.updatedRange || 'Master Clients!A:M' };
 }
 
+export async function updateClientInMasterSheet(
+  spreadsheetId: string,
+  client: Client
+): Promise<{ updatedRange: string }> {
+  try {
+    const existingRows = await readMasterSheetRows(spreadsheetId);
+    let targetRowIndex = -1;
+    for (let i = 1; i < existingRows.length; i++) {
+      if (existingRows[i] && existingRows[i][0] === client.id) {
+        targetRowIndex = i + 1; // 1-indexed row number in sheets
+        break;
+      }
+    }
+
+    const reqLink = client.docs.requirementsDocUrl
+      ? `=HYPERLINK("${client.docs.requirementsDocUrl}", "Requirements Doc")`
+      : 'Pending';
+    const convLink = client.docs.conversationExportUrl
+      ? `=HYPERLINK("${client.docs.conversationExportUrl}", "Conversation Doc")`
+      : 'Pending';
+    const outLink = client.docs.outreachStrategyDocUrl
+      ? `=HYPERLINK("${client.docs.outreachStrategyDocUrl}", "Outreach Doc")`
+      : 'Pending';
+
+    const displayStatus = client.status === 'Cancelled' ? 'Cancelled' : (client.stage || client.status);
+
+    const row = [
+      client.id,
+      client.name,
+      client.platform,
+      client.niche,
+      client.package,
+      client.pricing,
+      client.startDate,
+      client.endDate,
+      displayStatus,
+      reqLink,
+      convLink,
+      outLink,
+      new Date().toLocaleString(),
+    ];
+
+    if (targetRowIndex > 1) {
+      const updateRes = await authorizedFetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Master%20Clients!A${targetRowIndex}:M${targetRowIndex}?valueInputOption=USER_ENTERED`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({
+            range: `Master Clients!A${targetRowIndex}:M${targetRowIndex}`,
+            majorDimension: 'ROWS',
+            values: [row],
+          }),
+        }
+      );
+      return { updatedRange: updateRes.updatedRange || `Master Clients!A${targetRowIndex}:M${targetRowIndex}` };
+    } else {
+      return syncClientToMasterSheet(spreadsheetId, client);
+    }
+  } catch (err) {
+    console.warn('Failed to update in-place, falling back to append:', err);
+    return syncClientToMasterSheet(spreadsheetId, client);
+  }
+}
+
 // ==========================================
 // 3. GOOGLE CALENDAR MILESTONE AUTOMATION
 // ==========================================
@@ -346,6 +410,50 @@ export async function scheduleClientMilestonesOnCalendar(
 
   return updatedMilestones;
 }
+
+export async function cancelClientMilestonesOnCalendar(
+  client: Client,
+  purgeEvents = false
+): Promise<Milestone[]> {
+  const updatedMilestones: Milestone[] = [];
+  for (const m of client.milestones) {
+    if (!m.calendarEventId) {
+      updatedMilestones.push(m);
+      continue;
+    }
+
+    try {
+      if (purgeEvents) {
+        await authorizedFetch(
+          `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(m.calendarEventId)}`,
+          { method: 'DELETE' }
+        );
+        updatedMilestones.push({
+          ...m,
+          calendarEventId: undefined,
+          calendarLink: undefined,
+        });
+      } else {
+        await authorizedFetch(
+          `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(m.calendarEventId)}`,
+          {
+            method: 'PATCH',
+            body: JSON.stringify({
+              summary: `[CANCELLED - ${client.id}] ${client.name} — ${m.title}`,
+              description: `[ORDER CANCELLED on ${new Date().toLocaleDateString()}]\nReason: ${client.cancellationDetails?.reason || 'Cancelled by client'}\n${m.title}`,
+            }),
+          }
+        );
+        updatedMilestones.push(m);
+      }
+    } catch (err) {
+      console.error(`Failed to cancel calendar event for milestone "${m.title}":`, err);
+      updatedMilestones.push(m);
+    }
+  }
+  return updatedMilestones;
+}
+
 
 // ==========================================
 // 4. GMAIL API DISPATCH & DRAFTS
@@ -399,4 +507,76 @@ export async function createGmailDraft(
   });
 
   return { draftId: res.id };
+}
+
+// ==========================================
+// 5. GOOGLE DRIVE ASSET EXPLORER & OPERATIONS
+// ==========================================
+
+export interface DriveFile {
+  id: string;
+  name: string;
+  mimeType: string;
+  webViewLink?: string;
+  iconLink?: string;
+  modifiedTime?: string;
+  size?: string;
+}
+
+export async function listDriveFiles(searchTerm?: string, pageSize = 30): Promise<DriveFile[]> {
+  let query = 'trashed = false';
+  if (searchTerm && searchTerm.trim()) {
+    const escaped = searchTerm.replace(/'/g, "\\'");
+    query += ` and name contains '${escaped}'`;
+  }
+  const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&pageSize=${pageSize}&fields=files(id,name,mimeType,webViewLink,iconLink,modifiedTime,size)&orderBy=modifiedTime desc`;
+  const res = await authorizedFetch(url);
+  return res.files || [];
+}
+
+export async function createDriveFolder(name: string): Promise<DriveFile> {
+  const res = await authorizedFetch('https://www.googleapis.com/drive/v3/files', {
+    method: 'POST',
+    body: JSON.stringify({
+      name,
+      mimeType: 'application/vnd.google-apps.folder',
+    }),
+  });
+  return res;
+}
+
+export async function deleteDriveFile(fileId: string): Promise<void> {
+  await authorizedFetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
+    method: 'DELETE',
+  });
+}
+
+// ==========================================
+// 6. GOOGLE CALENDAR EVENT RETRIEVAL
+// ==========================================
+
+export interface CalendarEventItem {
+  id: string;
+  summary: string;
+  description?: string;
+  start: { dateTime?: string; date?: string };
+  end: { dateTime?: string; date?: string };
+  htmlLink?: string;
+}
+
+export async function listUpcomingCalendarEvents(maxResults = 25): Promise<CalendarEventItem[]> {
+  const now = new Date().toISOString();
+  const url = `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${encodeURIComponent(now)}&maxResults=${maxResults}&singleEvents=true&orderBy=startTime`;
+  const res = await authorizedFetch(url);
+  return res.items || [];
+}
+
+// ==========================================
+// 7. GOOGLE SHEETS LIVE DATA READER
+// ==========================================
+
+export async function readMasterSheetRows(spreadsheetId: string): Promise<string[][]> {
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Master%20Clients!A1:M100`;
+  const res = await authorizedFetch(url);
+  return res.values || [];
 }

@@ -44,10 +44,22 @@ export const Header: React.FC<HeaderProps> = ({
         >
           PodConnect Hub AI
         </button>
+        <span className="hidden sm:inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20">
+          <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
+          Firestore
+        </span>
       </div>
 
       {/* Zone 2: 4-5 concise single-line text nav links (Desktop / Tablet landscape) */}
       <nav className="hidden lg:flex items-center gap-6 text-sm font-medium text-slate-400">
+        <button
+          onClick={() => onNavigate('clients')}
+          className={`hover:text-slate-100 transition-colors whitespace-nowrap shrink-0 cursor-pointer py-1 ${
+            currentView === 'clients' ? 'text-indigo-400 font-semibold' : ''
+          }`}
+        >
+          Clients & Staging
+        </button>
         <button
           onClick={() => onNavigate('database')}
           className={`hover:text-slate-100 transition-colors whitespace-nowrap shrink-0 cursor-pointer py-1 ${
@@ -56,6 +68,7 @@ export const Header: React.FC<HeaderProps> = ({
         >
           Master Database
         </button>
+
         <button
           onClick={() => onNavigate('onboarding')}
           className={`hover:text-slate-100 transition-colors whitespace-nowrap shrink-0 cursor-pointer py-1 ${
@@ -87,6 +100,14 @@ export const Header: React.FC<HeaderProps> = ({
           }`}
         >
           Milestones
+        </button>
+        <button
+          onClick={() => onNavigate('workspace')}
+          className={`hover:text-slate-100 transition-colors whitespace-nowrap shrink-0 cursor-pointer py-1 ${
+            currentView === 'workspace' ? 'text-indigo-400 font-semibold' : ''
+          }`}
+        >
+          Workspace
         </button>
       </nav>
 

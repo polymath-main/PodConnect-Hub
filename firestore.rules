@@ -1,0 +1,75 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global safety net: Deny all by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Health / connection test document (read-only)
+    match /test/{docId} {
+      allow read: if true;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 64 && id.matches('^[a-zA-Z0-9_-]+$');
+    }
+
+    function isValidClient(data) {
+      return data.id is string && data.id.size() <= 64 &&
+             data.name is string && data.name.size() <= 100 &&
+             data.niche is string && data.niche.size() <= 100 &&
+             data.package is string && data.package.size() <= 100 &&
+             data.userId is string && data.userId.size() <= 128;
+    }
+
+    function isValidLead(data) {
+      return data.id is string && data.id.size() <= 64 &&
+             data.clientId is string && data.clientId.size() <= 64 &&
+             data.showName is string && data.showName.size() <= 200 &&
+             data.platform is string && data.platform.size() <= 50 &&
+             data.niche is string && data.niche.size() <= 100 &&
+             data.userId is string && data.userId.size() <= 128;
+    }
+
+    function isValidMilestone(data) {
+      return data.id is string && data.id.size() <= 64 &&
+             data.clientId is string && data.clientId.size() <= 64 &&
+             data.title is string && data.title.size() <= 200 &&
+             data.completed is bool &&
+             data.userId is string && data.userId.size() <= 128;
+    }
+
+    match /clients/{clientId} {
+      allow get: if isOwner(resource.data.userId);
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isValidId(clientId) && isOwner(request.resource.data.userId) && isValidClient(request.resource.data);
+      allow update: if isValidId(clientId) && isOwner(resource.data.userId) && request.resource.data.userId == resource.data.userId && isValidClient(request.resource.data);
+      allow delete: if isValidId(clientId) && isOwner(resource.data.userId);
+    }
+
+    match /leads/{leadId} {
+      allow get: if isOwner(resource.data.userId);
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isValidId(leadId) && isOwner(request.resource.data.userId) && isValidLead(request.resource.data);
+      allow update: if isValidId(leadId) && isOwner(resource.data.userId) && request.resource.data.userId == resource.data.userId && isValidLead(request.resource.data);
+      allow delete: if isValidId(leadId) && isOwner(resource.data.userId);
+    }
+
+    match /milestones/{milestoneId} {
+      allow get: if isOwner(resource.data.userId);
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isValidId(milestoneId) && isOwner(request.resource.data.userId) && isValidMilestone(request.resource.data);
+      allow update: if isValidId(milestoneId) && isOwner(resource.data.userId) && request.resource.data.userId == resource.data.userId && isValidMilestone(request.resource.data);
+      allow delete: if isValidId(milestoneId) && isOwner(resource.data.userId);
+    }
+  }
+}
