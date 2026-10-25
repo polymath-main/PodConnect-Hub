@@ -80,12 +80,60 @@ export type LeadStatus =
   | 'Contacted'
   | 'Sent'
   | 'Dispatched'
+  | 'Follow-Up 1 Sent'
+  | 'Follow-Up 2 Sent'
+  | 'Breakup Sent'
   | 'Replied'
   | 'Responded'
   | 'Converted'
   | 'Booked'
   | 'Archived'
   | 'Passed';
+
+export type PipelineStage =
+  | 'drafted'
+  | 'initial_sent'
+  | 'fu1_due'
+  | 'fu1_sent'
+  | 'fu2_due'
+  | 'fu2_sent'
+  | 'breakup_due'
+  | 'breakup_sent'
+  | 'responded'
+  | 'booked'
+  | 'archived';
+
+export type SequenceTouchpoint = 'initial' | 'follow_up_1' | 'follow_up_2' | 'breakup';
+
+export interface SequenceStep {
+  subject: string;
+  body: string;
+  delayDays: number;
+  talkingPoints?: string[];
+}
+
+export interface OutreachSequence {
+  id?: number;
+  tenantId?: string;
+  leadId: number;
+  clientId: string;
+  initial: SequenceStep;
+  followUp1: SequenceStep;
+  followUp2: SequenceStep;
+  breakup: SequenceStep;
+  pipelineStage: PipelineStage;
+  initialSentAt?: string;
+  fu1DueAt?: string;
+  fu1SentAt?: string;
+  fu2DueAt?: string;
+  fu2SentAt?: string;
+  breakupDueAt?: string;
+  breakupSentAt?: string;
+  threadId?: string;
+  lastMessageId?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
 
 export interface Lead {
   id: number;
@@ -106,6 +154,8 @@ export interface Lead {
   notes?: string;
   location?: string;
   pitchDraft?: PitchDraft;
+  pipelineStage?: PipelineStage;
+  sequence?: OutreachSequence;
 }
 
 export interface StagedLead {

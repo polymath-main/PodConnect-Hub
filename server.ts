@@ -321,6 +321,160 @@ app.post('/api/leads/:id/dispatch', async (req: AuthenticatedRequest, res: Respo
   }
 });
 
+// Get outreach sequence and cadence state for a lead
+app.get('/api/leads/:id/sequence', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    const tenantId = req.tenantId || 'tenant_default';
+    const sequence = dbService.getSequenceByLeadId(tenantId, id);
+    res.json({ success: true, sequence });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to fetch outreach sequence' });
+  }
+});
+
+// Save or manually refine an outreach sequence
+app.put('/api/leads/:id/sequence', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    const tenantId = req.tenantId || 'tenant_default';
+    const sequenceData = req.body;
+    sequenceData.leadId = id;
+    sequenceData.tenantId = tenantId;
+
+    const saved = dbService.saveSequence(tenantId, sequenceData);
+    res.json({ success: true, sequence: saved });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to save outreach sequence' });
+  }
+});
+
+// Dispatch specific sequence touchpoint (initial, follow_up_1, follow_up_2, breakup) with Gmail threading
+app.post('/api/leads/:id/dispatch-touchpoint', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    const tenantId = req.tenantId || 'tenant_default';
+    const { accessToken, touchpoint, customSubject, customBody } = req.body;
+
+    if (!accessToken) {
+      return res.status(400).json({ error: 'OAuth accessToken is required' });
+    }
+    if (!['initial', 'follow_up_1', 'follow_up_2', 'breakup'].includes(touchpoint)) {
+      return res.status(400).json({ error: 'Invalid touchpoint: must be initial, follow_up_1, follow_up_2, or breakup' });
+    }
+
+    if (!emailService.checkRateLimit(tenantId)) {
+      return res.status(429).json({ error: 'Rate limit exceeded: maximum 10 dispatches/minute per workspace' });
+    }
+
+    const lead = dbService.getLeadById(tenantId, id);
+    if (!lead) {
+      return res.status(404).json({ error: 'Lead not found in current workspace' });
+    }
+    if (!lead.email) {
+      return res.status(400).json({ error: 'Lead does not have a contact email' });
+    }
+
+    let sequence = dbService.getSequenceByLeadId(tenantId, id);
+
+    let subject = customSubject;
+    let body = customBody;
+
+    if (!subject || !body) {
+      if (!sequence) {
+        return res.status(400).json({ error: 'No sequence found for this lead. Generate or provide copy first.' });
+      }
+      if (touchpoint === 'initial') {
+        subject = subject || sequence.initial.subject;
+        body = body || sequence.initial.body;
+      } else if (touchpoint === 'follow_up_1') {
+        subject = subject || sequence.followUp1.subject;
+        body = body || sequence.followUp1.body;
+      } else if (touchpoint === 'follow_up_2') {
+        subject = subject || sequence.followUp2.subject;
+        body = body || sequence.followUp2.body;
+      } else if (touchpoint === 'breakup') {
+        subject = subject || sequence.breakup.subject;
+        body = body || sequence.breakup.body;
+      }
+    }
+
+    if (!subject || !body) {
+      return res.status(400).json({ error: 'Email subject and body are required' });
+    }
+
+    const threadId = sequence?.threadId;
+    const inReplyTo = sequence?.lastMessageId;
+
+    const dispatchRes = await emailService.sendViaGmail({
+      accessToken,
+      to: lead.email,
+      subject,
+      body,
+      threadId,
+      inReplyTo,
+    });
+
+    const nowIso = new Date().toISOString();
+    let nextStage: any = 'initial_sent';
+    let leadStatus: any = 'Dispatched';
+    const metadataUpdates: any = {
+      threadId: dispatchRes.threadId,
+      lastMessageId: dispatchRes.messageId,
+    };
+
+    if (touchpoint === 'initial') {
+      nextStage = 'initial_sent';
+      leadStatus = 'Dispatched';
+      metadataUpdates.initialSentAt = nowIso;
+      metadataUpdates.fu1DueAt = new Date(Date.now() + 3 * 86400000).toISOString();
+    } else if (touchpoint === 'follow_up_1') {
+      nextStage = 'fu1_sent';
+      leadStatus = 'Follow-Up 1 Sent';
+      metadataUpdates.fu1SentAt = nowIso;
+      metadataUpdates.fu2DueAt = new Date(Date.now() + 4 * 86400000).toISOString();
+    } else if (touchpoint === 'follow_up_2') {
+      nextStage = 'fu2_sent';
+      leadStatus = 'Follow-Up 2 Sent';
+      metadataUpdates.fu2SentAt = nowIso;
+      metadataUpdates.breakupDueAt = new Date(Date.now() + 7 * 86400000).toISOString();
+    } else if (touchpoint === 'breakup') {
+      nextStage = 'breakup_sent';
+      leadStatus = 'Breakup Sent';
+      metadataUpdates.breakupSentAt = nowIso;
+    }
+
+    // Ensure sequence row exists
+    if (!sequence) {
+      sequence = dbService.saveSequence(tenantId, {
+        leadId: id,
+        clientId: lead.clientId,
+        initial: { subject, body, delayDays: 0 },
+        followUp1: { subject: `Re: ${subject}`, body: '', delayDays: 3 },
+        followUp2: { subject: `Re: ${subject}`, body: '', delayDays: 4 },
+        breakup: { subject: `Re: ${subject}`, body: '', delayDays: 7 },
+        pipelineStage: nextStage,
+      });
+    }
+
+    dbService.updateSequenceStage(tenantId, id, nextStage, metadataUpdates);
+    dbService.updateLeadStatus(tenantId, id, leadStatus);
+
+    res.json({
+      success: true,
+      touchpoint,
+      messageId: dispatchRes.messageId,
+      threadId: dispatchRes.threadId,
+      dispatchedTo: lead.email,
+      pipelineStage: nextStage,
+      leadId: id,
+    });
+  } catch (err: any) {
+    console.error('Dispatch touchpoint error:', err);
+    res.status(500).json({ error: err.message || 'Failed to dispatch sequence touchpoint' });
+  }
+});
+
 // ==========================================
 // 4. SCALABLE SCRAPER JOB QUEUE
 // ==========================================
@@ -676,6 +830,134 @@ Format output as JSON:
   } catch (error: any) {
     console.error('Generate pitch error:', error);
     res.status(500).json({ error: error.message || 'Failed to generate pitch' });
+  }
+});
+
+// Full 4-Touchpoint Outreach Sequence Generator using gemini-3.8-flash
+app.post('/api/gemini/generate-outreach-sequence', async (req: Request, res: Response) => {
+  try {
+    const { clientName, niche, messagePillars, credibilityAssets, showName, hostName, recentTopic } = req.body;
+
+    const prompt = `
+You are PodConnect Hub AI's master podcast pitch copywriter and outreach campaign strategist.
+Write a complete, highly persuasive 4-touchpoint guest booking outreach cadence for the following podcast:
+
+Show Name: ${showName}
+Host Name: ${hostName || 'Host'}
+Guest/Client Name: ${clientName}
+Niche: ${niche}
+Core Thought Leadership Pillars: ${Array.isArray(messagePillars) ? messagePillars.join('; ') : messagePillars}
+Credibility Assets / Track Record: ${Array.isArray(credibilityAssets) ? credibilityAssets.join('; ') : credibilityAssets}
+Recent Episode Context: ${recentTopic || 'Recent episodes on industry trends'}
+
+SEQUENCE SPECIFICATIONS:
+
+1. TOUCHPOINT 1: Initial Pitch (Day 0)
+- Subject: Short, irresistible, referencing the show or a provocative question.
+- Hook: Natural, referencing the show's focus.
+- Value Prop: Why the audience benefits right now.
+- 3 provocative, actionable conversation angles/topics.
+- Credibility punch (metrics, achievements).
+- Low-friction call to action (15-min chat).
+
+2. TOUCHPOINT 2: Follow-Up 1 - The Value Bump (Day 3)
+- Subject: Re: [Initial Subject]
+- Quick, courteous bump (2-3 sentences max).
+- Offers a fresh provocative question or perspective without repeating the whole pitch.
+- Zero guilt, high respect for their time.
+
+3. TOUCHPOINT 3: Follow-Up 2 - The Proof Point (Day 7)
+- Subject: Re: [Initial Subject]
+- Shares a specific tangible case study, framework, or listener takeaway that ${clientName} can break down.
+- Directly addresses a listener pain point.
+
+4. TOUCHPOINT 4: Final Follow-Up - The Breakup / Graceful Close (Day 14)
+- Subject: Re: [Initial Subject]
+- Gracefully closes the loop ("Assuming your interview calendar is fully booked or this isn't a fit right now...").
+- Removes all pressure while leaving the door wide open for future seasons or topics.
+
+Format the response strictly as JSON with this schema:
+{
+  "initial": {
+    "subject": "...",
+    "body": "...",
+    "talkingPoints": ["Point 1", "Point 2", "Point 3"],
+    "delayDays": 0
+  },
+  "followUp1": {
+    "subject": "...",
+    "body": "...",
+    "delayDays": 3
+  },
+  "followUp2": {
+    "subject": "...",
+    "body": "...",
+    "delayDays": 4
+  },
+  "breakup": {
+    "subject": "...",
+    "body": "...",
+    "delayDays": 7
+  }
+}
+`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.8-flash',
+      contents: prompt,
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            initial: {
+              type: Type.OBJECT,
+              properties: {
+                subject: { type: Type.STRING },
+                body: { type: Type.STRING },
+                talkingPoints: { type: Type.ARRAY, items: { type: Type.STRING } },
+                delayDays: { type: Type.NUMBER },
+              },
+              required: ['subject', 'body', 'talkingPoints', 'delayDays'],
+            },
+            followUp1: {
+              type: Type.OBJECT,
+              properties: {
+                subject: { type: Type.STRING },
+                body: { type: Type.STRING },
+                delayDays: { type: Type.NUMBER },
+              },
+              required: ['subject', 'body', 'delayDays'],
+            },
+            followUp2: {
+              type: Type.OBJECT,
+              properties: {
+                subject: { type: Type.STRING },
+                body: { type: Type.STRING },
+                delayDays: { type: Type.NUMBER },
+              },
+              required: ['subject', 'body', 'delayDays'],
+            },
+            breakup: {
+              type: Type.OBJECT,
+              properties: {
+                subject: { type: Type.STRING },
+                body: { type: Type.STRING },
+                delayDays: { type: Type.NUMBER },
+              },
+              required: ['subject', 'body', 'delayDays'],
+            },
+          },
+          required: ['initial', 'followUp1', 'followUp2', 'breakup'],
+        },
+      },
+    });
+
+    const parsed = JSON.parse(response.text || '{}');
+    res.json({ success: true, sequence: parsed });
+  } catch (error: any) {
+    console.error('Generate sequence error:', error);
+    res.status(500).json({ error: error.message || 'Failed to generate outreach sequence' });
   }
 });
 

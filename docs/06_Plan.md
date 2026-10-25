@@ -125,6 +125,27 @@
 
 ---
 
+## Phase 8: Multi-Touch Outreach Sequence & Cadence Pipeline Engine ✅ COMPLETE
+
+- [x] 2026-10-25T23:05:00+06:00 — Extend types in `src/types/index.ts`: define `PipelineStage`, `SequenceTouchpoint`, `SequenceStep`, and `OutreachSequence`; extend `Lead` with `pipelineStage` and `sequence`.
+- [x] 2026-10-25T23:06:00+06:00 — Enhance `EmailService` in `src/server/email.ts`: add conversation threading support using RFC 2822 `In-Reply-To` and `References` headers and Gmail API `threadId`.
+- [x] 2026-10-25T23:07:00+06:00 — Add `outreach_sequences` table in SQLite (`src/server/db.ts`) with indices on `tenant_id, lead_id` and `pipeline_stage`.
+- [x] 2026-10-25T23:08:00+06:00 — Implement sequence repository in `DatabaseService`: `getSequenceByLeadId`, `saveSequence`, `updateSequenceStage`, and left-join pipeline stage in `getLeads()`.
+- [x] 2026-10-25T23:09:00+06:00 — Add backend API endpoints in `server.ts`:
+  - `POST /api/gemini/generate-outreach-sequence`: structured 4-touchpoint generation (Initial, Value Bump, Proof Point, Breakup) via Gemini 3.8 Flash.
+  - `GET /api/leads/:id/sequence`: sequence retrieval.
+  - `PUT /api/leads/:id/sequence`: sequence draft save and manual refinement.
+  - `POST /api/leads/:id/dispatch-touchpoint`: thread-aware Gmail API delivery with automatic cadence stage progression.
+- [x] 2026-10-25T23:11:00+06:00 — Add typed API methods in `src/lib/api.ts` (`generateOutreachSequence`, `getLeadSequence`, `saveLeadSequence`, `dispatchTouchpoint`).
+- [x] 2026-10-25T23:20:00+06:00 — Overhaul `src/components/OutreachHubView.tsx`:
+  - Multi-touch Sequence Studio with 4 tabs (🎯 Initial Pitch, ⚡ Follow-Up 1, 📊 Follow-Up 2, 🚪 Final Breakup).
+  - Personalization variable tokens toolbar (`+ {{hostName}}`, `+ {{showName}}`, `+ {{clientName}}`, `+ {{niche}}`).
+  - Cadence Stage & Threading Telemetry bar.
+  - Pipeline Stage filter bar on the shows selection list (`All`, `Drafted`, `Pitch Sent`, `FU 1 Due`, `FU 2 Due`, `Breakup Due`, `Responded`, `Booked`).
+- [x] 2026-10-25T23:27:00+06:00 — Create comprehensive test suite `scratch/test_outreach_sequence.ts` verifying threading headers, sequence CRUD, and stage progression: 4/4 PASSED.
+
+---
+
 ## Verification Commands
 
 ```bash
@@ -142,6 +163,9 @@ node ./node_modules/tsx/dist/cli.mjs scratch/test_phase3_to_6.ts
 
 # SwarmScraper lead discovery test suite (Phase 7)
 python3 scratch/test_swarm_discovery.py
+
+# Multi-touch outreach sequence & cadence test suite (Phase 8)
+node ./node_modules/tsx/dist/cli.mjs scratch/test_outreach_sequence.ts
 
 # Server health check
 curl http://localhost:3000/api/health

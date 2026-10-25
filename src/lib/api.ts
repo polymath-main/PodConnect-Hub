@@ -1,4 +1,15 @@
-import { Tenant, TenantMember, UserRole, ScrapeJob, StagedLead, Lead, JobLogEntry } from '../types';
+import {
+  Tenant,
+  TenantMember,
+  UserRole,
+  ScrapeJob,
+  StagedLead,
+  Lead,
+  JobLogEntry,
+  OutreachSequence,
+  SequenceTouchpoint,
+  PipelineStage,
+} from '../types';
 import { PlanLimits } from './plans';
 
 const STORAGE_ACTIVE_TENANT_KEY = 'podconnect_active_tenant_id';
@@ -232,6 +243,50 @@ class ApiClient {
     hostName: string;
   }): Promise<any> {
     return this.request('/api/gemini/generate-pitch', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  }
+
+  public async generateOutreachSequence(params: {
+    clientName: string;
+    niche: string;
+    messagePillars: string[];
+    credibilityAssets: string[];
+    showName: string;
+    hostName: string;
+    recentTopic?: string;
+  }): Promise<{ success: boolean; sequence: any }> {
+    return this.request('/api/gemini/generate-outreach-sequence', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  }
+
+  public async getLeadSequence(leadId: number): Promise<{ success: boolean; sequence: OutreachSequence | null }> {
+    return this.request(`/api/leads/${leadId}/sequence`);
+  }
+
+  public async saveLeadSequence(
+    leadId: number,
+    sequence: Partial<OutreachSequence>
+  ): Promise<{ success: boolean; sequence: OutreachSequence }> {
+    return this.request(`/api/leads/${leadId}/sequence`, {
+      method: 'PUT',
+      body: JSON.stringify(sequence),
+    });
+  }
+
+  public async dispatchTouchpoint(
+    leadId: number,
+    params: {
+      accessToken: string;
+      touchpoint: SequenceTouchpoint;
+      customSubject?: string;
+      customBody?: string;
+    }
+  ): Promise<any> {
+    return this.request(`/api/leads/${leadId}/dispatch-touchpoint`, {
       method: 'POST',
       body: JSON.stringify(params),
     });

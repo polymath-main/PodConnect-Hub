@@ -1,7 +1,17 @@
 import { DatabaseSync } from 'node:sqlite';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { Tenant, TenantMember, UserRole, ScrapeJob, StagedLead, Lead, JobLogEntry } from '../types';
+import {
+  Tenant,
+  TenantMember,
+  UserRole,
+  ScrapeJob,
+  StagedLead,
+  Lead,
+  JobLogEntry,
+  OutreachSequence,
+  PipelineStage,
+} from '../types';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -120,6 +130,39 @@ export class DatabaseService {
         metadata TEXT
       );
     `);
+
+    // 7. Outreach Sequences table (Multi-Touch Pipeline & Cadence Engine)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS outreach_sequences (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tenant_id TEXT NOT NULL DEFAULT 'tenant_default',
+        lead_id INTEGER NOT NULL UNIQUE,
+        client_id TEXT NOT NULL,
+        initial_subject TEXT,
+        initial_body TEXT,
+        initial_talking_points TEXT,
+        fu1_subject TEXT,
+        fu1_body TEXT,
+        fu2_subject TEXT,
+        fu2_body TEXT,
+        breakup_subject TEXT,
+        breakup_body TEXT,
+        pipeline_stage TEXT NOT NULL DEFAULT 'drafted',
+        initial_sent_at TIMESTAMP,
+        fu1_due_at TIMESTAMP,
+        fu1_sent_at TIMESTAMP,
+        fu2_due_at TIMESTAMP,
+        fu2_sent_at TIMESTAMP,
+        breakup_due_at TIMESTAMP,
+        breakup_sent_at TIMESTAMP,
+        thread_id TEXT,
+        last_message_id TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_seq_tenant_lead ON outreach_sequences(tenant_id, lead_id);');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_seq_stage ON outreach_sequences(pipeline_stage);');
 
     // Migrations: Add tenant_id to staged_leads and leads if not present
     this.runMigrations();
@@ -531,32 +574,42 @@ export class DatabaseService {
     tag?: string;
     status?: string;
     search?: string;
+    pipelineStage?: string;
   } = {}): Lead[] {
-    let query = 'SELECT * FROM leads WHERE (tenant_id = ? OR tenant_id IS NULL)';
+    let query = `
+      SELECT leads.*, seq.pipeline_stage, seq.initial_sent_at, seq.fu1_due_at, seq.fu1_sent_at, seq.fu2_due_at, seq.fu2_sent_at, seq.breakup_due_at, seq.breakup_sent_at
+      FROM leads
+      LEFT JOIN outreach_sequences seq ON seq.lead_id = leads.id AND (seq.tenant_id = leads.tenant_id OR seq.tenant_id = 'tenant_default')
+      WHERE (leads.tenant_id = ? OR leads.tenant_id IS NULL)
+    `;
     const params: any[] = [tenantId];
 
     if (filters.clientId && filters.clientId !== 'ALL') {
-      query += ' AND client_id = ?';
+      query += ' AND leads.client_id = ?';
       params.push(filters.clientId);
     }
     if (filters.niche) {
-      query += ' AND niche LIKE ?';
+      query += ' AND leads.niche LIKE ?';
       params.push(`%${filters.niche}%`);
     }
     if (filters.tag) {
-      query += ' AND tags LIKE ?';
+      query += ' AND leads.tags LIKE ?';
       params.push(`%${filters.tag}%`);
     }
     if (filters.status && filters.status !== 'ALL') {
-      query += ' AND status = ?';
+      query += ' AND leads.status = ?';
       params.push(filters.status);
     }
+    if (filters.pipelineStage && filters.pipelineStage !== 'ALL') {
+      query += ' AND seq.pipeline_stage = ?';
+      params.push(filters.pipelineStage);
+    }
     if (filters.search) {
-      query += ' AND (show_name LIKE ? OR host_name LIKE ? OR email LIKE ?)';
+      query += ' AND (leads.show_name LIKE ? OR leads.host_name LIKE ? OR leads.email LIKE ?)';
       params.push(`%${filters.search}%`, `%${filters.search}%`, `%${filters.search}%`);
     }
 
-    query += ' ORDER BY id DESC';
+    query += ' ORDER BY leads.id DESC';
 
     const rows = this.db.prepare(query).all(...params) as any[];
     return rows.map((r) => ({
@@ -577,6 +630,11 @@ export class DatabaseService {
       dateAdded: r.date_added,
       notes: r.notes,
       location: r.location,
+      pipelineStage: (r.pipeline_stage as PipelineStage) || (
+        r.status === 'Dispatched' || r.status === 'Sent' ? 'initial_sent' :
+        r.status === 'Booked' ? 'booked' :
+        r.status === 'Responded' || r.status === 'Replied' ? 'responded' : 'drafted'
+      ),
     }));
   }
 
@@ -857,6 +915,192 @@ export class DatabaseService {
       message: r.message,
       metadata: r.metadata ? JSON.parse(r.metadata) : undefined,
     }));
+  }
+
+  // ==========================================
+  // MULTI-TOUCH OUTREACH SEQUENCES & CADENCE
+  // ==========================================
+
+  public getSequenceByLeadId(tenantId: string, leadId: number): OutreachSequence | null {
+    const row = this.db.prepare(`
+      SELECT * FROM outreach_sequences
+      WHERE (tenant_id = ? OR tenant_id = 'tenant_default') AND lead_id = ?
+    `).get(tenantId, leadId) as any;
+
+    if (!row) return null;
+
+    let talkingPoints: string[] = [];
+    try {
+      talkingPoints = row.initial_talking_points ? JSON.parse(row.initial_talking_points) : [];
+    } catch {}
+
+    return {
+      id: row.id,
+      tenantId: row.tenant_id,
+      leadId: row.lead_id,
+      clientId: row.client_id,
+      initial: {
+        subject: row.initial_subject || '',
+        body: row.initial_body || '',
+        delayDays: 0,
+        talkingPoints,
+      },
+      followUp1: {
+        subject: row.fu1_subject || '',
+        body: row.fu1_body || '',
+        delayDays: 3,
+      },
+      followUp2: {
+        subject: row.fu2_subject || '',
+        body: row.fu2_body || '',
+        delayDays: 4,
+      },
+      breakup: {
+        subject: row.breakup_subject || '',
+        body: row.breakup_body || '',
+        delayDays: 7,
+      },
+      pipelineStage: row.pipeline_stage || 'drafted',
+      initialSentAt: row.initial_sent_at,
+      fu1DueAt: row.fu1_due_at,
+      fu1SentAt: row.fu1_sent_at,
+      fu2DueAt: row.fu2_due_at,
+      fu2SentAt: row.fu2_sent_at,
+      breakupDueAt: row.breakup_due_at,
+      breakupSentAt: row.breakup_sent_at,
+      threadId: row.thread_id,
+      lastMessageId: row.last_message_id,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  public saveSequence(tenantId: string, seq: OutreachSequence): OutreachSequence {
+    const talkingPointsJson = JSON.stringify(seq.initial.talkingPoints || []);
+    const existing = this.db.prepare(`
+      SELECT id FROM outreach_sequences WHERE lead_id = ?
+    `).get(seq.leadId) as any;
+
+    if (existing) {
+      this.db.prepare(`
+        UPDATE outreach_sequences SET
+          tenant_id = ?,
+          client_id = ?,
+          initial_subject = ?,
+          initial_body = ?,
+          initial_talking_points = ?,
+          fu1_subject = ?,
+          fu1_body = ?,
+          fu2_subject = ?,
+          fu2_body = ?,
+          breakup_subject = ?,
+          breakup_body = ?,
+          pipeline_stage = COALESCE(?, pipeline_stage),
+          updated_at = CURRENT_TIMESTAMP
+        WHERE lead_id = ?
+      `).run(
+        tenantId,
+        seq.clientId,
+        seq.initial.subject,
+        seq.initial.body,
+        talkingPointsJson,
+        seq.followUp1.subject,
+        seq.followUp1.body,
+        seq.followUp2.subject,
+        seq.followUp2.body,
+        seq.breakup.subject,
+        seq.breakup.body,
+        seq.pipelineStage,
+        seq.leadId
+      );
+    } else {
+      this.db.prepare(`
+        INSERT INTO outreach_sequences (
+          tenant_id, lead_id, client_id,
+          initial_subject, initial_body, initial_talking_points,
+          fu1_subject, fu1_body,
+          fu2_subject, fu2_body,
+          breakup_subject, breakup_body,
+          pipeline_stage
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        tenantId,
+        seq.leadId,
+        seq.clientId,
+        seq.initial.subject,
+        seq.initial.body,
+        talkingPointsJson,
+        seq.followUp1.subject,
+        seq.followUp1.body,
+        seq.followUp2.subject,
+        seq.followUp2.body,
+        seq.breakup.subject,
+        seq.breakup.body,
+        seq.pipelineStage || 'drafted'
+      );
+    }
+
+    return this.getSequenceByLeadId(tenantId, seq.leadId)!;
+  }
+
+  public updateSequenceStage(
+    tenantId: string,
+    leadId: number,
+    stage: PipelineStage,
+    metadata: {
+      initialSentAt?: string;
+      fu1DueAt?: string;
+      fu1SentAt?: string;
+      fu2DueAt?: string;
+      fu2SentAt?: string;
+      breakupDueAt?: string;
+      breakupSentAt?: string;
+      threadId?: string;
+      lastMessageId?: string;
+    } = {}
+  ): void {
+    const updates: string[] = ['pipeline_stage = ?', 'updated_at = CURRENT_TIMESTAMP'];
+    const params: any[] = [stage];
+
+    if (metadata.initialSentAt !== undefined) {
+      updates.push('initial_sent_at = ?');
+      params.push(metadata.initialSentAt);
+    }
+    if (metadata.fu1DueAt !== undefined) {
+      updates.push('fu1_due_at = ?');
+      params.push(metadata.fu1DueAt);
+    }
+    if (metadata.fu1SentAt !== undefined) {
+      updates.push('fu1_sent_at = ?');
+      params.push(metadata.fu1SentAt);
+    }
+    if (metadata.fu2DueAt !== undefined) {
+      updates.push('fu2_due_at = ?');
+      params.push(metadata.fu2DueAt);
+    }
+    if (metadata.fu2SentAt !== undefined) {
+      updates.push('fu2_sent_at = ?');
+      params.push(metadata.fu2SentAt);
+    }
+    if (metadata.breakupDueAt !== undefined) {
+      updates.push('breakup_due_at = ?');
+      params.push(metadata.breakupDueAt);
+    }
+    if (metadata.breakupSentAt !== undefined) {
+      updates.push('breakup_sent_at = ?');
+      params.push(metadata.breakupSentAt);
+    }
+    if (metadata.threadId !== undefined) {
+      updates.push('thread_id = ?');
+      params.push(metadata.threadId);
+    }
+    if (metadata.lastMessageId !== undefined) {
+      updates.push('last_message_id = ?');
+      params.push(metadata.lastMessageId);
+    }
+
+    params.push(leadId);
+    this.db.prepare(`UPDATE outreach_sequences SET ${updates.join(', ')} WHERE lead_id = ?`).run(...params);
   }
 }
 

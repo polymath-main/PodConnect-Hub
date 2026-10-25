@@ -21,6 +21,7 @@ export class EmailService {
 
   /**
    * Send an email via the Gmail API using the client's OAuth access token.
+   * Supports conversation threading via threadId and RFC 2822 In-Reply-To / References.
    */
   public async sendViaGmail(params: {
     accessToken: string;
@@ -28,8 +29,16 @@ export class EmailService {
     subject: string;
     body: string;
     fromName?: string;
-  }): Promise<{ messageId: string }> {
+    threadId?: string;
+    inReplyTo?: string;
+    references?: string;
+  }): Promise<{ messageId: string; threadId: string }> {
     const raw = this.encodeEmail(params);
+
+    const payload: { raw: string; threadId?: string } = { raw };
+    if (params.threadId) {
+      payload.threadId = params.threadId;
+    }
 
     const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
       method: 'POST',
@@ -37,7 +46,7 @@ export class EmailService {
         Authorization: `Bearer ${params.accessToken}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ raw }),
+      body: JSON.stringify(payload),
     });
 
     if (!res.ok) {
@@ -46,17 +55,23 @@ export class EmailService {
     }
 
     const data = await res.json();
-    return { messageId: data.id };
+    return {
+      messageId: data.id,
+      threadId: data.threadId || params.threadId || data.id,
+    };
   }
 
   /**
-   * Encode RFC 2822 formatted message into base64url
+   * Encode RFC 2822 formatted message into base64url.
+   * Injects In-Reply-To and References headers if provided for Gmail conversation threading.
    */
   public encodeEmail(params: {
     to: string;
     subject: string;
     body: string;
     fromName?: string;
+    inReplyTo?: string;
+    references?: string;
   }): string {
     const utf8Subject = `=?utf-8?B?${Buffer.from(params.subject, 'utf-8').toString('base64')}?=`;
     const messageParts = [
@@ -65,9 +80,22 @@ export class EmailService {
       'MIME-Version: 1.0',
       'Content-Type: text/plain; charset=utf-8',
       'Content-Transfer-Encoding: 7bit',
-      '',
-      params.body,
     ];
+
+    if (params.inReplyTo) {
+      const formatted = params.inReplyTo.startsWith('<') ? params.inReplyTo : `<${params.inReplyTo}>`;
+      messageParts.push(`In-Reply-To: ${formatted}`);
+    }
+
+    if (params.references) {
+      const formatted = params.references.startsWith('<') ? params.references : `<${params.references}>`;
+      messageParts.push(`References: ${formatted}`);
+    } else if (params.inReplyTo) {
+      const formatted = params.inReplyTo.startsWith('<') ? params.inReplyTo : `<${params.inReplyTo}>`;
+      messageParts.push(`References: ${formatted}`);
+    }
+
+    messageParts.push('', params.body);
 
     const message = messageParts.join('\r\n');
     return Buffer.from(message, 'utf-8')

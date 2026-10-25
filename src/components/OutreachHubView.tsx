@@ -17,8 +17,13 @@ import {
   ArrowLeft,
   Check,
   CalendarCheck2,
+  Layers,
+  Zap,
+  BarChart2,
+  DoorOpen,
+  Copy,
 } from 'lucide-react';
-import { Client, Lead, PitchDraft } from '../types';
+import { Client, Lead, PitchDraft, OutreachSequence, SequenceTouchpoint, PipelineStage } from '../types';
 import { sendGmailPitch, createGmailDraft, createOutreachStrategyDoc } from '../lib/workspace';
 import { getAccessToken } from '../lib/firebase';
 import { api } from '../lib/api';
@@ -68,8 +73,13 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
   // Outreach Mode: interactive, batch, docs
   const [dispatchMode, setDispatchMode] = useState<'interactive' | 'batch' | 'docs'>('interactive');
 
-  // Single Pitch State
+  // Single Pitch & Multi-Touch Sequence Studio State
   const [currentLeadForPitch, setCurrentLeadForPitch] = useState<Lead | null>(activePitchLead);
+  const [currentSequence, setCurrentSequence] = useState<OutreachSequence | null>(null);
+  const [activeTouchpoint, setActiveTouchpoint] = useState<SequenceTouchpoint>('initial');
+  const [isGeneratingSequence, setIsGeneratingSequence] = useState(false);
+  const [pipelineFilter, setPipelineFilter] = useState<string>('ALL');
+
   const [pitchDraft, setPitchDraft] = useState<PitchDraft | null>(null);
   const [isGeneratingPitch, setIsGeneratingPitch] = useState(false);
   const [isSendingEmail, setIsSendingEmail] = useState(false);
@@ -90,9 +100,7 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
 
   useEffect(() => {
     if (activePitchLead) {
-      setCurrentLeadForPitch(activePitchLead);
-      generatePitchForLead(activePitchLead);
-      setMobilePitchViewActive(true);
+      selectLeadForPitch(activePitchLead);
     }
   }, [activePitchLead]);
 
@@ -243,12 +251,83 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
     }
   };
 
-  const generatePitchForLead = async (lead: Lead) => {
+  const getStageBadgeLabel = (stage?: string): string => {
+    switch (stage) {
+      case 'drafted': return 'Drafted';
+      case 'initial_sent': return 'Pitch Sent';
+      case 'fu1_due': return '⚡ FU 1 Due';
+      case 'fu1_sent': return 'FU 1 Sent';
+      case 'fu2_due': return '📊 FU 2 Due';
+      case 'fu2_sent': return 'FU 2 Sent';
+      case 'breakup_due': return '🚪 Breakup Due';
+      case 'breakup_sent': return 'Breakup Sent';
+      case 'responded':
+      case 'Replied':
+      case 'Responded': return 'Responded';
+      case 'booked':
+      case 'Booked': return 'Booked';
+      case 'Dispatched':
+      case 'Sent': return 'Pitch Sent';
+      default: return stage || 'Drafted';
+    }
+  };
+
+  const getStageBadgeClass = (stage?: string): string => {
+    switch (stage) {
+      case 'drafted': return 'bg-slate-800 text-slate-300 border border-slate-700';
+      case 'initial_sent':
+      case 'Dispatched':
+      case 'Sent': return 'bg-sky-500/10 text-sky-400 border border-sky-500/20';
+      case 'fu1_due': return 'bg-amber-500/10 text-amber-300 border border-amber-500/30 font-bold';
+      case 'fu1_sent': return 'bg-blue-500/10 text-blue-300 border border-blue-500/20';
+      case 'fu2_due': return 'bg-amber-500/10 text-amber-300 border border-amber-500/30 font-bold';
+      case 'fu2_sent': return 'bg-indigo-500/10 text-indigo-300 border border-indigo-500/20';
+      case 'breakup_due': return 'bg-rose-500/10 text-rose-300 border border-rose-500/30 font-bold';
+      case 'breakup_sent': return 'bg-purple-500/10 text-purple-300 border border-purple-500/20';
+      case 'responded':
+      case 'Replied':
+      case 'Responded': return 'bg-amber-500/10 text-amber-400 border border-amber-500/20';
+      case 'booked':
+      case 'Booked': return 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
+      default: return 'bg-slate-800 text-slate-400 border border-slate-700';
+    }
+  };
+
+  const selectLeadForPitch = async (lead: Lead) => {
+    setCurrentLeadForPitch(lead);
+    setMobilePitchViewActive(true);
+    setSendSuccessMessage(null);
+    setOutreachError(null);
+    setActiveTouchpoint('initial');
+
+    try {
+      const res = await api.getLeadSequence(lead.id);
+      if (res.success && res.sequence) {
+        setCurrentSequence(res.sequence);
+        setPitchDraft({
+          leadId: lead.id,
+          showName: lead.showName,
+          hostName: lead.hostName,
+          recipientEmail: lead.email || '',
+          subject: res.sequence.initial.subject,
+          body: res.sequence.initial.body,
+          talkingPoints: res.sequence.initial.talkingPoints || [],
+        });
+      } else {
+        await generateFullSequenceForLead(lead);
+      }
+    } catch {
+      await generateFullSequenceForLead(lead);
+    }
+  };
+
+  const generateFullSequenceForLead = async (lead: Lead) => {
+    setIsGeneratingSequence(true);
     setIsGeneratingPitch(true);
     setSendSuccessMessage(null);
 
     try {
-      const json = await api.generatePitch({
+      const res = await api.generateOutreachSequence({
         clientName: activeClient?.name || 'Client',
         niche: activeClient?.niche || lead.niche,
         messagePillars: activeClient?.messagePillars || ['Key industry insights and lessons'],
@@ -257,49 +336,147 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
         hostName: lead.hostName,
       });
 
-      if (!json || !json.pitch) throw new Error(json?.error || 'Pitch generation failed');
+      if (!res.success || !res.sequence) {
+        throw new Error('Failed to generate outreach sequence');
+      }
+
+      const seqData: OutreachSequence = {
+        leadId: lead.id,
+        clientId: activeClient?.id || lead.clientId,
+        initial: res.sequence.initial,
+        followUp1: res.sequence.followUp1,
+        followUp2: res.sequence.followUp2,
+        breakup: res.sequence.breakup,
+        pipelineStage: lead.pipelineStage || 'drafted',
+      };
+
+      const saved = await api.saveLeadSequence(lead.id, seqData);
+      setCurrentSequence(saved.sequence);
 
       setPitchDraft({
         leadId: lead.id,
         showName: lead.showName,
         hostName: lead.hostName,
         recipientEmail: lead.email || '',
-        subject: json.pitch.subject,
-        body: json.pitch.body,
-        talkingPoints: json.pitch.talkingPoints || [],
+        subject: res.sequence.initial.subject,
+        body: res.sequence.initial.body,
+        talkingPoints: res.sequence.initial.talkingPoints || [],
       });
+
       handleUpdateLeadStatus(lead, 'Pitch Drafted');
-      toast.success(`Generated pitch draft for ${lead.showName}`);
+      toast.success(`Generated 4-touchpoint cadence for ${lead.showName}`);
     } catch (err: any) {
-      const msg = `Error generating pitch: ${err.message}`;
-      setOutreachError(msg);
-      toast.error(msg);
+      toast.error(`Error generating sequence: ${err.message}`);
     } finally {
+      setIsGeneratingSequence(false);
       setIsGeneratingPitch(false);
     }
   };
 
-  const handleSendSinglePitch = () => {
+  const generatePitchForLead = async (lead: Lead) => {
+    await generateFullSequenceForLead(lead);
+  };
+
+  const handleUpdateActiveStep = (field: 'subject' | 'body', value: string) => {
+    if (!currentSequence) return;
+    const key =
+      activeTouchpoint === 'initial'
+        ? 'initial'
+        : activeTouchpoint === 'follow_up_1'
+        ? 'followUp1'
+        : activeTouchpoint === 'follow_up_2'
+        ? 'followUp2'
+        : 'breakup';
+
+    const updated = {
+      ...currentSequence,
+      [key]: {
+        ...currentSequence[key],
+        [field]: value,
+      },
+    };
+    setCurrentSequence(updated);
+
+    if (activeTouchpoint === 'initial' && pitchDraft) {
+      setPitchDraft({
+        ...pitchDraft,
+        [field]: value,
+      });
+    }
+  };
+
+  const handleInsertVariable = (variable: string) => {
+    if (!currentSequence) return;
+    const key =
+      activeTouchpoint === 'initial'
+        ? 'initial'
+        : activeTouchpoint === 'follow_up_1'
+        ? 'followUp1'
+        : activeTouchpoint === 'follow_up_2'
+        ? 'followUp2'
+        : 'breakup';
+
+    const currentBody = currentSequence[key].body || '';
+    handleUpdateActiveStep('body', currentBody + (currentBody ? ' ' : '') + variable);
+  };
+
+  const handleSaveSequenceDraft = async () => {
+    if (!currentLeadForPitch || !currentSequence) return;
+    try {
+      const res = await api.saveLeadSequence(currentLeadForPitch.id, currentSequence);
+      if (res.sequence) {
+        setCurrentSequence(res.sequence);
+      }
+      toast.success('Outreach sequence saved successfully');
+    } catch (err: any) {
+      toast.error(`Failed to save sequence: ${err.message}`);
+    }
+  };
+
+  const handleDispatchActiveTouchpoint = () => {
     if (!isAuthenticated) {
       onSignIn();
       return;
     }
-
-    if (!pitchDraft) return;
-
-    if (!pitchDraft.recipientEmail) {
+    if (!currentLeadForPitch || !currentSequence) return;
+    if (!currentLeadForPitch.email) {
       setOutreachError('Please provide a recipient email address for this host.');
       toast.warning('Please provide a recipient email address for this host.');
       return;
     }
 
+    const key =
+      activeTouchpoint === 'initial'
+        ? 'initial'
+        : activeTouchpoint === 'follow_up_1'
+        ? 'followUp1'
+        : activeTouchpoint === 'follow_up_2'
+        ? 'followUp2'
+        : 'breakup';
+
+    const activeStep = currentSequence[key];
+    const stepLabel =
+      activeTouchpoint === 'initial'
+        ? 'Initial Pitch (Day 0)'
+        : activeTouchpoint === 'follow_up_1'
+        ? 'Follow-Up 1: Value Bump (Day 3)'
+        : activeTouchpoint === 'follow_up_2'
+        ? 'Follow-Up 2: Proof Point (Day 7)'
+        : 'Final Breakup Email (Day 14)';
+
+    const threadNotice =
+      activeTouchpoint !== 'initial' && currentSequence.threadId
+        ? `Preserving Gmail thread (${currentSequence.threadId})`
+        : 'Starting fresh conversation';
+
     onRequestConfirmation({
-      title: `Send Guest Pitch to ${pitchDraft.showName}`,
-      description: `Dispatch personalized guest interview pitch via Gmail API directly to host:`,
+      title: `Send ${stepLabel} to ${currentLeadForPitch.showName}`,
+      description: `Dispatch email via Gmail API directly to host:`,
       affectedItems: [
-        `Recipient: ${pitchDraft.recipientEmail}`,
-        `Host Name: ${pitchDraft.hostName || 'Host'}`,
-        `Subject: ${pitchDraft.subject}`,
+        `Recipient: ${currentLeadForPitch.email}`,
+        `Host Name: ${currentLeadForPitch.hostName || 'Host'}`,
+        `Subject: ${activeStep.subject}`,
+        `Threading: ${threadNotice}`,
       ],
       onConfirm: async () => {
         setIsSendingEmail(true);
@@ -307,19 +484,22 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
           const accessToken = await getAccessToken();
           if (!accessToken) throw new Error('OAuth access token unavailable. Please sign in again.');
 
-          await api.dispatchPitch(pitchDraft.leadId, {
+          await api.dispatchTouchpoint(currentLeadForPitch.id, {
             accessToken,
-            subject: pitchDraft.subject,
-            body: pitchDraft.body,
+            touchpoint: activeTouchpoint,
+            customSubject: activeStep.subject,
+            customBody: activeStep.body,
           });
 
-          const currentLead = leads.find((l) => l.id === pitchDraft.leadId);
-          if (currentLead) {
-            await handleUpdateLeadStatus(currentLead, 'Dispatched');
-          }
-          const successMsg = `Pitch email dispatched successfully via Gmail relay!`;
+          const successMsg = `${stepLabel} dispatched successfully via Gmail relay!`;
           setSendSuccessMessage(successMsg);
           toast.success(successMsg);
+
+          const refreshed = await api.getLeadSequence(currentLeadForPitch.id);
+          if (refreshed.sequence) {
+            setCurrentSequence(refreshed.sequence);
+          }
+          loadLeads(activeClient?.id);
           checkGmailSyncStatus();
         } catch (err: any) {
           const errText = `Gmail dispatch failed: ${err.message}`;
@@ -330,6 +510,10 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
         }
       },
     });
+  };
+
+  const handleSendSinglePitch = () => {
+    handleDispatchActiveTouchpoint();
   };
 
   const handleSaveDraft = async () => {
@@ -524,6 +708,20 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
     return `${minutes}m ago`;
   };
 
+  const filteredLeads = leads.filter((l) => {
+    if (pipelineFilter === 'ALL') return true;
+    const currentStage =
+      l.pipelineStage ||
+      (l.status === 'Dispatched' || l.status === 'Sent'
+        ? 'initial_sent'
+        : l.status === 'Booked'
+        ? 'booked'
+        : l.status === 'Responded' || l.status === 'Replied'
+        ? 'responded'
+        : 'drafted');
+    return currentStage === pipelineFilter;
+  });
+
   return (
     <div className="max-w-7xl mx-auto space-y-6">
       {/* Top Banner with Real-Time Gmail Sync Status Indicator */}
@@ -666,7 +864,7 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
       {/* Main Mode View */}
       {dispatchMode === 'interactive' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-          {/* Left Column: Leads Selection List (Hidden on mobile when editing pitch) */}
+          {/* Left Column: Leads Selection List with Pipeline Filter */}
           <div
             className={`lg:col-span-5 bg-slate-900/60 border border-slate-800 rounded-xl p-4 space-y-3 ${
               mobilePitchViewActive ? 'hidden lg:block' : 'block'
@@ -674,7 +872,7 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
           >
             <div className="flex items-center justify-between pb-2 border-b border-slate-800">
               <span className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
-                Select Show to Pitch ({leads.length})
+                Select Show to Pitch ({filteredLeads.length})
               </span>
               <button
                 onClick={() => loadLeads(activeClient?.id)}
@@ -685,22 +883,42 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
               </button>
             </div>
 
-            {leads.length === 0 ? (
+            {/* Pipeline Stage Filter Pills */}
+            <div className="flex items-center gap-1 overflow-x-auto pb-1 text-[10px]">
+              {['ALL', 'drafted', 'initial_sent', 'fu1_due', 'fu2_due', 'breakup_due', 'responded', 'booked'].map((st) => (
+                <button
+                  key={st}
+                  type="button"
+                  onClick={() => setPipelineFilter(st)}
+                  className={`px-2 py-1 rounded transition-colors cursor-pointer shrink-0 font-medium ${
+                    pipelineFilter === st
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800/80'
+                  }`}
+                >
+                  {st === 'ALL' ? 'All Leads' : getStageBadgeLabel(st)}
+                </button>
+              ))}
+            </div>
+
+            {filteredLeads.length === 0 ? (
               <div className="py-12 text-center text-xs text-slate-500">
-                No leads available. Run the scraper first.
+                {leads.length === 0 ? 'No leads available. Run the scraper first.' : 'No leads matching this pipeline filter.'}
               </div>
             ) : (
               <div className="space-y-2.5 max-h-[560px] overflow-y-auto pr-1">
-                {leads.map((l) => {
+                {filteredLeads.map((l) => {
                   const isSelected = currentLeadForPitch?.id === l.id;
+                  const currentStage = l.pipelineStage || (
+                    l.status === 'Dispatched' || l.status === 'Sent' ? 'initial_sent' :
+                    l.status === 'Booked' ? 'booked' :
+                    l.status === 'Responded' || l.status === 'Replied' ? 'responded' : 'drafted'
+                  );
+
                   return (
                     <div
                       key={l.id}
-                      onClick={() => {
-                        setCurrentLeadForPitch(l);
-                        generatePitchForLead(l);
-                        setMobilePitchViewActive(true);
-                      }}
+                      onClick={() => selectLeadForPitch(l)}
                       className={`p-3.5 rounded-lg border transition-colors cursor-pointer space-y-2 ${
                         isSelected
                           ? 'bg-indigo-600/15 border-indigo-500/50 text-white'
@@ -718,9 +936,13 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
                         <span className="text-[10px] text-slate-500">{l.platform}</span>
                       </div>
 
-                      {/* SIMPLE OUTREACH STATUS TOGGLE (Sent, Responded, Booked) */}
+                      {/* Pipeline Stage Badge & Status Controls */}
                       <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between" onClick={(e) => e.stopPropagation()}>
-                        <span className="text-[10px] text-slate-500 uppercase font-medium">Status:</span>
+                        <div className="flex items-center gap-1.5">
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${getStageBadgeClass(currentStage)}`}>
+                            {getStageBadgeLabel(currentStage)}
+                          </span>
+                        </div>
                         <div className="flex items-center gap-1 bg-slate-900 p-0.5 rounded border border-slate-800 text-[10px]">
                           <button
                             onClick={() => handleUpdateLeadStatus(l, 'Sent')}
@@ -761,13 +983,13 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
             )}
           </div>
 
-          {/* Right Column: Interactive Pitch Inspector / Editor */}
+          {/* Right Column: Multi-Touch Sequence Studio & Pipeline Inspector */}
           <div
             className={`lg:col-span-7 bg-slate-900/60 border border-slate-800 rounded-xl p-4 sm:p-5 space-y-4 ${
               !mobilePitchViewActive ? 'hidden lg:block' : 'block'
             }`}
           >
-            {/* Mobile Back Button to list */}
+            {/* Mobile Back Button */}
             {mobilePitchViewActive && (
               <button
                 onClick={() => setMobilePitchViewActive(false)}
@@ -780,7 +1002,7 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
 
             <div className="flex items-center justify-between pb-3 border-b border-slate-800 flex-wrap gap-2">
               <div>
-                <h2 className="text-sm font-semibold text-white">Interactive Pitch Preview & Dispatch</h2>
+                <h2 className="text-sm font-semibold text-white">Multi-Touch Sequence Studio & Cadence</h2>
                 <p className="text-[11px] text-slate-400 truncate max-w-xs">
                   Target Show: {currentLeadForPitch ? currentLeadForPitch.showName : 'None selected'}
                 </p>
@@ -788,47 +1010,13 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
 
               {currentLeadForPitch && (
                 <div className="flex items-center gap-2">
-                  {/* Status Toggle on active pitch inspector */}
-                  <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800 text-xs">
-                    <button
-                      onClick={() => handleUpdateLeadStatus(currentLeadForPitch, 'Sent')}
-                      className={`px-2.5 py-1 rounded transition-colors cursor-pointer text-xs ${
-                        currentLeadForPitch.status === 'Sent' || currentLeadForPitch.status === 'Dispatched'
-                          ? 'bg-sky-600 text-white font-semibold'
-                          : 'text-slate-400 hover:text-slate-200'
-                      }`}
-                    >
-                      Sent
-                    </button>
-                    <button
-                      onClick={() => handleUpdateLeadStatus(currentLeadForPitch, 'Responded')}
-                      className={`px-2.5 py-1 rounded transition-colors cursor-pointer text-xs ${
-                        currentLeadForPitch.status === 'Responded'
-                          ? 'bg-amber-600 text-white font-semibold'
-                          : 'text-slate-400 hover:text-slate-200'
-                      }`}
-                    >
-                      Responded
-                    </button>
-                    <button
-                      onClick={() => handleUpdateLeadStatus(currentLeadForPitch, 'Booked')}
-                      className={`px-2.5 py-1 rounded transition-colors cursor-pointer text-xs ${
-                        currentLeadForPitch.status === 'Booked'
-                          ? 'bg-emerald-600 text-white font-semibold'
-                          : 'text-slate-400 hover:text-slate-200'
-                      }`}
-                    >
-                      Booked
-                    </button>
-                  </div>
-
                   <button
-                    onClick={() => generatePitchForLead(currentLeadForPitch)}
-                    disabled={isGeneratingPitch}
+                    onClick={() => generateFullSequenceForLead(currentLeadForPitch)}
+                    disabled={isGeneratingSequence}
                     className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-indigo-300 hover:text-white bg-indigo-950/40 border border-indigo-800/80 rounded-lg transition-colors cursor-pointer min-h-[34px]"
                   >
                     <Sparkles className="w-3.5 h-3.5" />
-                    <span>Regenerate</span>
+                    <span>{isGeneratingSequence ? 'Generating...' : 'Regenerate Cadence'}</span>
                   </button>
                 </div>
               )}
@@ -841,53 +1029,210 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
               </div>
             )}
 
-            {!pitchDraft ? (
+            {!currentLeadForPitch ? (
               <div className="h-96 flex flex-col items-center justify-center text-center p-8 border border-dashed border-slate-800 rounded-lg">
                 <Mail className="w-8 h-8 text-slate-600 mb-2" />
                 <p className="text-xs text-slate-400">
-                  Select any podcast show from the list to preview an AI-crafted guest pitch.
+                  Select any podcast show from the list to preview and edit its 4-touchpoint guest outreach sequence.
                 </p>
               </div>
             ) : (
               <div className="space-y-4">
+                {/* Cadence Stage & Threading Telemetry Bar */}
+                <div className="bg-slate-950/80 border border-slate-800 rounded-lg p-2.5 flex items-center justify-between text-xs overflow-x-auto gap-2">
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="text-[11px] font-medium text-slate-400">Cadence Stage:</span>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${getStageBadgeClass(currentSequence?.pipelineStage || currentLeadForPitch?.pipelineStage)}`}>
+                      {getStageBadgeLabel(currentSequence?.pipelineStage || currentLeadForPitch?.pipelineStage)}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 text-[10px] text-slate-400 shrink-0">
+                    {currentSequence?.threadId && (
+                      <span className="bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 px-2 py-0.5 rounded font-mono">
+                        Thread: {currentSequence.threadId.slice(0, 8)}...
+                      </span>
+                    )}
+                    {currentSequence?.fu1DueAt && (
+                      <span className="flex items-center gap-1 text-amber-300 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
+                        <Clock className="w-3 h-3" />
+                        FU 1 Due: {new Date(currentSequence.fu1DueAt).toLocaleDateString()}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* 4-Touchpoint Multi-Touch Sequence Tabs */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 p-1 bg-slate-950 rounded-lg border border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => setActiveTouchpoint('initial')}
+                    className={`flex flex-col items-center justify-center p-2 rounded-md transition-all cursor-pointer ${
+                      activeTouchpoint === 'initial'
+                        ? 'bg-indigo-600 text-white shadow-md'
+                        : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                    }`}
+                  >
+                    <span className="text-xs font-semibold">🎯 1. Initial Pitch</span>
+                    <span className="text-[10px] opacity-75">Day 0 (Hook & Topics)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTouchpoint('follow_up_1')}
+                    className={`flex flex-col items-center justify-center p-2 rounded-md transition-all cursor-pointer ${
+                      activeTouchpoint === 'follow_up_1'
+                        ? 'bg-indigo-600 text-white shadow-md'
+                        : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                    }`}
+                  >
+                    <span className="text-xs font-semibold">⚡ 2. Follow-Up 1</span>
+                    <span className="text-[10px] opacity-75">Day +3 (Value Bump)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTouchpoint('follow_up_2')}
+                    className={`flex flex-col items-center justify-center p-2 rounded-md transition-all cursor-pointer ${
+                      activeTouchpoint === 'follow_up_2'
+                        ? 'bg-indigo-600 text-white shadow-md'
+                        : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                    }`}
+                  >
+                    <span className="text-xs font-semibold">📊 3. Follow-Up 2</span>
+                    <span className="text-[10px] opacity-75">Day +7 (Proof Point)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTouchpoint('breakup')}
+                    className={`flex flex-col items-center justify-center p-2 rounded-md transition-all cursor-pointer ${
+                      activeTouchpoint === 'breakup'
+                        ? 'bg-indigo-600 text-white shadow-md'
+                        : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                    }`}
+                  >
+                    <span className="text-xs font-semibold">🚪 4. Breakup</span>
+                    <span className="text-[10px] opacity-75">Day +14 (Close Loop)</span>
+                  </button>
+                </div>
+
+                {/* Host Contact Email Input */}
                 <div>
                   <label className="text-xs text-slate-400 block mb-1">Host Contact Email</label>
                   <input
                     type="email"
-                    value={pitchDraft.recipientEmail}
-                    onChange={(e) => setPitchDraft({ ...pitchDraft, recipientEmail: e.target.value })}
+                    value={currentLeadForPitch.email || ''}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      currentLeadForPitch.email = val;
+                      if (pitchDraft) setPitchDraft({ ...pitchDraft, recipientEmail: val });
+                    }}
                     placeholder="host@podcast.com"
                     className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs font-mono text-slate-200 focus:outline-none focus:border-indigo-500 min-h-[40px]"
                   />
                 </div>
 
+                {/* Subject Line Input with Thread Notice */}
                 <div>
-                  <label className="text-xs text-slate-400 block mb-1">Subject Line</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-xs text-slate-400">
+                      Subject Line ({activeTouchpoint === 'initial' ? 'Initial Pitch' : activeTouchpoint === 'follow_up_1' ? 'Follow-Up 1' : activeTouchpoint === 'follow_up_2' ? 'Follow-Up 2' : 'Breakup Email'})
+                    </label>
+                    {activeTouchpoint !== 'initial' && currentSequence?.threadId && (
+                      <span className="text-[10px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20 font-mono">
+                        Threaded in Gmail
+                      </span>
+                    )}
+                  </div>
                   <input
                     type="text"
-                    value={pitchDraft.subject}
-                    onChange={(e) => setPitchDraft({ ...pitchDraft, subject: e.target.value })}
+                    value={
+                      activeTouchpoint === 'initial'
+                        ? currentSequence?.initial?.subject || pitchDraft?.subject || ''
+                        : activeTouchpoint === 'follow_up_1'
+                        ? currentSequence?.followUp1?.subject || `Re: ${currentSequence?.initial?.subject || ''}`
+                        : activeTouchpoint === 'follow_up_2'
+                        ? currentSequence?.followUp2?.subject || `Re: ${currentSequence?.initial?.subject || ''}`
+                        : currentSequence?.breakup?.subject || `Re: ${currentSequence?.initial?.subject || ''}`
+                    }
+                    onChange={(e) => handleUpdateActiveStep('subject', e.target.value)}
                     className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs font-medium text-slate-200 focus:outline-none focus:border-indigo-500 min-h-[40px]"
                   />
                 </div>
 
+                {/* Dynamic Personalization Variables Toolbar */}
+                <div className="flex items-center justify-between flex-wrap gap-2 pt-1 text-[11px]">
+                  <span className="text-slate-400 text-xs font-medium">Quick Personalization Tokens:</span>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={() => handleInsertVariable('{{hostName}}')}
+                      className="px-2 py-0.5 rounded bg-slate-800 text-indigo-300 hover:bg-slate-700 border border-slate-700 cursor-pointer text-[10px]"
+                    >
+                      + {`{{hostName}}`}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleInsertVariable('{{showName}}')}
+                      className="px-2 py-0.5 rounded bg-slate-800 text-indigo-300 hover:bg-slate-700 border border-slate-700 cursor-pointer text-[10px]"
+                    >
+                      + {`{{showName}}`}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleInsertVariable('{{clientName}}')}
+                      className="px-2 py-0.5 rounded bg-slate-800 text-indigo-300 hover:bg-slate-700 border border-slate-700 cursor-pointer text-[10px]"
+                    >
+                      + {`{{clientName}}`}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleInsertVariable('{{niche}}')}
+                      className="px-2 py-0.5 rounded bg-slate-800 text-indigo-300 hover:bg-slate-700 border border-slate-700 cursor-pointer text-[10px]"
+                    >
+                      + {`{{niche}}`}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Email Body Textarea */}
                 <div>
-                  <label className="text-xs text-slate-400 block mb-1">Email Body</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-xs text-slate-400">
+                      Email Body ({activeTouchpoint === 'initial' ? 'Initial Pitch' : activeTouchpoint === 'follow_up_1' ? 'Follow-Up 1' : activeTouchpoint === 'follow_up_2' ? 'Follow-Up 2' : 'Breakup Email'})
+                    </label>
+                    <span className="text-[10px] text-slate-500 font-mono">
+                      {(activeTouchpoint === 'initial'
+                        ? currentSequence?.initial?.body || pitchDraft?.body || ''
+                        : activeTouchpoint === 'follow_up_1'
+                        ? currentSequence?.followUp1?.body || ''
+                        : activeTouchpoint === 'follow_up_2'
+                        ? currentSequence?.followUp2?.body || ''
+                        : currentSequence?.breakup?.body || ''
+                      ).split(/\s+/).filter(Boolean).length} words
+                    </span>
+                  </div>
                   <textarea
-                    value={pitchDraft.body}
-                    onChange={(e) => setPitchDraft({ ...pitchDraft, body: e.target.value })}
+                    value={
+                      activeTouchpoint === 'initial'
+                        ? currentSequence?.initial?.body || pitchDraft?.body || ''
+                        : activeTouchpoint === 'follow_up_1'
+                        ? currentSequence?.followUp1?.body || ''
+                        : activeTouchpoint === 'follow_up_2'
+                        ? currentSequence?.followUp2?.body || ''
+                        : currentSequence?.breakup?.body || ''
+                    }
+                    onChange={(e) => handleUpdateActiveStep('body', e.target.value)}
                     rows={8}
                     className="w-full bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 font-sans leading-relaxed"
                   />
                 </div>
 
-                {pitchDraft.talkingPoints?.length > 0 && (
+                {/* Conversation Angles for Initial Pitch */}
+                {activeTouchpoint === 'initial' && (currentSequence?.initial?.talkingPoints || pitchDraft?.talkingPoints || []).length > 0 && (
                   <div>
-                    <span className="text-[11px] font-semibold text-slate-400 block mb-1.5 uppercase">
+                    <span className="text-[11px] font-semibold text-slate-400 block mb-1.5 uppercase tracking-wider">
                       Conversation Angles Included:
                     </span>
                     <ul className="space-y-1 text-xs text-slate-300">
-                      {pitchDraft.talkingPoints.map((pt, i) => (
+                      {(currentSequence?.initial?.talkingPoints || pitchDraft?.talkingPoints || []).map((pt, i) => (
                         <li key={i} className="flex items-center gap-2">
                           <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 shrink-0" />
                           <span>{pt}</span>
@@ -897,21 +1242,30 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
                   </div>
                 )}
 
-                <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2 sm:gap-3 pt-3 border-t border-slate-800">
+                {/* Bottom Action Bar */}
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-3 border-t border-slate-800">
                   <button
-                    onClick={handleSaveDraft}
+                    type="button"
+                    onClick={handleSaveSequenceDraft}
                     className="px-4 py-2.5 text-xs font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors cursor-pointer min-h-[40px] text-center"
                   >
-                    Save as Gmail Draft
+                    Save Sequence Draft
                   </button>
-                  <button
-                    onClick={handleSendSinglePitch}
-                    disabled={isSendingEmail || !pitchDraft.recipientEmail}
-                    className="flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded-lg transition-colors cursor-pointer shadow-md shadow-indigo-950/40 min-h-[40px]"
-                  >
-                    <Send className="w-3.5 h-3.5" />
-                    <span>{isSendingEmail ? 'Sending...' : 'Send via Gmail API'}</span>
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleDispatchActiveTouchpoint}
+                      disabled={isSendingEmail || !currentLeadForPitch.email}
+                      className="flex items-center justify-center gap-2 px-5 py-2.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded-lg transition-colors cursor-pointer shadow-md shadow-indigo-950/40 min-h-[40px]"
+                    >
+                      <Send className="w-3.5 h-3.5" />
+                      <span>
+                        {isSendingEmail
+                          ? 'Sending...'
+                          : `Send ${activeTouchpoint === 'initial' ? 'Initial Pitch' : activeTouchpoint === 'follow_up_1' ? 'Follow-Up 1' : activeTouchpoint === 'follow_up_2' ? 'Follow-Up 2' : 'Breakup'} via Gmail`}
+                      </span>
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
