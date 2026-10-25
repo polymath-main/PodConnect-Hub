@@ -113,6 +113,18 @@
 
 ---
 
+## Phase 7: SwarmScraper Autonomous Lead Sourcing Engine ✅ COMPLETE
+
+- [x] 2026-10-25T22:15:00+06:00 — Overhaul `scraper.py`: eliminate hardcoded sample feeds; implement `search_itunes_podcasts(query, limit)` querying Apple Podcasts public API (zero-paid-API).
+- [x] 2026-10-25T22:23:00+06:00 — Implement `LivenessGate`: parse episode `<pubDate>` with `email.utils.parsedate_to_datetime` across recent episodes; discard dormant shows inactive for >60 days.
+- [x] 2026-10-25T22:25:00+06:00 — Implement `SwarmWebsiteContactSpider`: crawl show homepage and `/contact`, `/about`, `/booking` sub-pages when RSS email is generic (`@anchor.fm`, `@buzzsprout.com`); extract direct domain emails, host socials (Twitter/X, LinkedIn), and booking forms (Typeform, PodMatch, Tally).
+- [x] 2026-10-25T22:27:00+06:00 — Implement `expand_search_terms(niche)`: decompose compound queries into bigrams and high-intent terms to ensure robust recall and mitigate podfade.
+- [x] 2026-10-25T22:28:00+06:00 — Implement strict RFC email validation with `email_priority` scoring and domain hints, preventing npm package false positives (`react@18.3.1`).
+- [x] 2026-10-25T22:29:00+06:00 — Standardize database resolution in `PodcastLeadScraper` to `DEFAULT_DB_PATH` and pass `cwd` in `JobQueueManager.startWorker` (`src/server/queue.ts`).
+- [x] 2026-10-25T22:30:00+06:00 — Create comprehensive verification test suite `scratch/test_swarm_discovery.py` testing live Apple search, liveness gate, contact spidering, and SQLite staging persistence: 4/4 PASSED.
+
+---
+
 ## Verification Commands
 
 ```bash
@@ -125,8 +137,11 @@ npm run build
 # Static structural integrity
 python3 ~/.gemini/config/skills/qa-analyzer/scripts/analyzer.py src/
 
-# End-to-end integration test
+# End-to-end integration test (Phases 3 - 6)
 node ./node_modules/tsx/dist/cli.mjs scratch/test_phase3_to_6.ts
+
+# SwarmScraper lead discovery test suite (Phase 7)
+python3 scratch/test_swarm_discovery.py
 
 # Server health check
 curl http://localhost:3000/api/health

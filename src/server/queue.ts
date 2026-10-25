@@ -162,21 +162,27 @@ export class JobQueueManager {
       message: `Worker started for ${job.niche}`,
     });
 
-    const py = spawn('python3', [
-      SCRAPER_SCRIPT_PATH,
-      '--tenant-id',
-      job.tenantId,
-      '--job-id',
-      job.id,
-      '--client',
-      job.clientId,
-      '--niche',
-      job.niche,
-      '--min-subs',
-      job.minSubs.toString(),
-      '--limit',
-      job.targetCount.toString(),
-    ]);
+    const py = spawn(
+      'python3',
+      [
+        SCRAPER_SCRIPT_PATH,
+        '--tenant-id',
+        job.tenantId,
+        '--job-id',
+        job.id,
+        '--client',
+        job.clientId,
+        '--niche',
+        job.niche,
+        '--min-subs',
+        job.minSubs.toString(),
+        '--limit',
+        job.targetCount.toString(),
+      ],
+      {
+        cwd: path.resolve(__dirname, '../../'),
+      }
+    );
 
     this.activeWorkers.set(job.id, { process: py, job });
 
