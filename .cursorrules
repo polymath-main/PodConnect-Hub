@@ -1,0 +1,112 @@
+# PodConnect Hub AI — Cursor Rules
+
+## MANDATORY: Read Before ANY Task
+
+You are working on PodConnect Hub AI — a multi-tenant SaaS podcast booking platform.
+
+**Before writing a single line of code, read these files in order:**
+
+1. `docs/01_PRD.md` — What the product does, user stories, and what is OUT OF SCOPE
+2. `docs/02_AppFlow.md` — Screen state machines, navigation, button actions, error handling
+3. `docs/03_UI_Spec.md` — Exact hex colors, typography, spacing tokens, component states
+4. `docs/04_TRD.md` — Locked tech stack (exact library versions), folder layout, API routes
+5. `docs/05_Schema.md` — SQLite + Firestore schema, indexes, RLS, RBAC decision matrix
+6. `docs/06_Plan.md` — What is DONE and what is NEXT (atomic checklist)
+
+---
+
+## After Completing Any Step
+
+Open `docs/06_Plan.md`, mark the step with `[x]`, and append:
+```
+[x] {ISO-8601-timestamp} — {one-line summary}
+```
+
+---
+
+## Hard Constraints
+
+### Never Do These
+- ❌ Do NOT add new npm packages without checking `docs/04_TRD.md`
+- ❌ Do NOT use `/usr/bin/` paths (Termux: use `$PREFIX/bin/`)
+- ❌ Do NOT install Python packages without `--break-system-packages`
+- ❌ Do NOT write SQL queries without `WHERE tenant_id = ?` scope
+- ❌ Do NOT use SQL string interpolation — parameterized queries only
+- ❌ Do NOT invent hex color values — use `docs/03_UI_Spec.md` exclusively
+- ❌ Do NOT implement any feature listed in `docs/01_PRD.md §5 Out of Scope`
+- ❌ Do NOT add light mode — this is a dark-only product
+- ❌ Do NOT mark a plan step `[x]` unless `npm run lint` exits 0
+- ❌ Do NOT add scraper workers beyond 2 concurrent (Android memory constraint)
+- ❌ Do NOT use `better-sqlite3` — use Node 24 built-in `node:sqlite`
+
+### Always Do These
+- ✅ Run `npm install --legacy-peer-deps` (not plain `npm install`)
+- ✅ Run `npm run lint` after every change
+- ✅ Run `npx vite build` to verify no bundler regressions
+- ✅ Use `tsx server.ts` to run the server (not `node server.ts`)
+- ✅ Use `src/lib/api.ts` for all frontend API calls (no raw fetch)
+- ✅ Use `src/server/db.ts` `DatabaseService` for all SQLite access
+- ✅ Pass `X-Tenant-ID` header on every API request from the frontend
+- ✅ Apply `authMiddleware` on every new Express route under `/api/*`
+
+---
+
+## Tech Stack (Exact Versions — Do Not Change)
+
+| Package | Version |
+|---------|---------|
+| react | ^19.0.1 |
+| vite | ^8.3.0 |
+| express | ^4.21.2 |
+| typescript | ^5.9.3 |
+| tailwindcss | ^4.3.3 |
+| @google/genai | ^2.4.0 |
+| firebase | ^13.1.0 |
+| lucide-react | ^0.546.0 |
+| motion | ^12.23.24 |
+| recharts | ^3.10.1 |
+| tsx | ^4.21.0 |
+
+---
+
+## Colors (No Others Allowed)
+
+| Purpose | Hex |
+|---------|-----|
+| Canvas background | #090D16 |
+| Surface base | #0F172A |
+| Surface raised | #1E293B |
+| Primary | #6366F1 |
+| Accent | #0EA5E9 |
+| Success | #10B981 |
+| Warning | #F59E0B |
+| Danger | #F43F5E |
+| Text primary | #F1F5F9 |
+| Text secondary | #94A3B8 |
+
+---
+
+## Database Tables (Do Not Rename)
+
+`tenants` | `tenant_members` | `staged_leads` | `leads` | `jobs` | `job_logs`
+
+All in SQLite WAL at: `podconnect_leads.db` (project root)
+Full schema: `docs/05_Schema.md`
+
+---
+
+## API Route Prefix
+
+All authenticated routes: `/api/*` (requires `Authorization: Bearer <token>` + `X-Tenant-ID` header)
+Public routes: `/api/health` only
+
+---
+
+## Environment
+
+- OS: Android 16 / Termux aarch64
+- Node: v24.22.1 (`node:sqlite` built-in available)
+- Python: 3.14 (for `scraper.py`)
+- Run dev: `npm run dev` (tsx server.ts)
+- Build: `npm run build` (vite build)
+- Type check: `npm run lint` (tsc --noEmit)

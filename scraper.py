@@ -109,12 +109,13 @@ def generate_lead_tags(niche, platform, subs=2500, host_name="Show Host"):
 
 
 class PodcastLeadScraper:
-    def __init__(self, db_name="podconnect_leads.db"):
+    def __init__(self, db_name="podconnect_leads.db", tenant_id="tenant_default"):
         self.db_name = db_name
+        self.tenant_id = tenant_id
         self.conn = sqlite3.connect(self.db_name)
         self.create_tables()
 
-    def log(self, message, lead=None, level="INFO"):
+    def log(self, message, lead=None, level="INFO", progress=None):
         """Outputs structured JSON line for backend SSE streaming"""
         payload = {
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -122,6 +123,8 @@ class PodcastLeadScraper:
             "message": message,
             "lead": lead
         }
+        if progress is not None:
+            payload["progress"] = progress
         print(json.dumps(payload), flush=True)
 
     def create_tables(self):
@@ -342,15 +345,17 @@ class PodcastLeadScraper:
         tags_json = json.dumps(lead.get("tags") or generate_lead_tags(lead["niche"], lead["platform"], lead.get("subscribers", 2500), lead.get("host_name", "Show Host")))
         
         cursor.execute('''
-            INSERT INTO staged_leads (client_id, show_name, host_name, platform, show_url, feed_url, email, subscribers, niche, tags, score, location)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO staged_leads (tenant_id, client_id, show_name, host_name, platform, show_url, feed_url, email, subscribers, niche, tags, score, location)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(client_id, show_name) DO UPDATE SET
+                tenant_id = excluded.tenant_id,
                 host_name = excluded.host_name,
                 email = CASE WHEN excluded.email != '' THEN excluded.email ELSE staged_leads.email END,
                 subscribers = max(staged_leads.subscribers, excluded.subscribers),
                 tags = excluded.tags,
                 score = excluded.score
         ''', (
+            self.tenant_id,
             lead["client_id"],
             lead["show_name"],
             lead["host_name"],
@@ -557,10 +562,10 @@ class PodcastLeadScraper:
         return leads
 
 
-def run_discovery_pipeline(client_id, niche, min_subs=1000, target_count=5, stage_only=True):
-    scraper = PodcastLeadScraper()
-    scraper.log(f"Initializing Multi-Source Lead Sourcing for Client {client_id} (Niche: {niche})")
-    scraper.log("Enforcing compliance: parsing robots.txt rules and establishing token-bucket rate limits")
+def run_discovery_pipeline(client_id, niche, min_subs=1000, target_count=5, stage_only=True, tenant_id="tenant_default", job_id=""):
+    scraper = PodcastLeadScraper(tenant_id=tenant_id)
+    scraper.log(f"Initializing Multi-Source Lead Sourcing for Client {client_id} (Niche: {niche})", progress=5)
+    scraper.log("Enforcing compliance: parsing robots.txt rules and establishing token-bucket rate limits", progress=15)
 
     sample_feeds = [
         ("https://feeds.simplecast.com/54nAGcIl", "tech saas startup software ai devops cloud"),
@@ -576,7 +581,7 @@ def run_discovery_pipeline(client_id, niche, min_subs=1000, target_count=5, stag
     ]
 
     niche_lower = niche.lower()
-    scraper.log(f"Scanning open RSS feeds and platform directories matching '{niche}'...")
+    scraper.log(f"Scanning open RSS feeds and platform directories matching '{niche}'...", progress=25)
     
     matched_feeds = []
     for feed_url, feed_tags in sample_feeds:
@@ -587,20 +592,24 @@ def run_discovery_pipeline(client_id, niche, min_subs=1000, target_count=5, stag
         matched_feeds = [sample_feeds[0][0], sample_feeds[3][0], sample_feeds[4][0]]
 
     staged_results = []
-    for feed_url in matched_feeds[:target_count]:
-        scraper.log(f"Connecting to RSS feed endpoint: {feed_url}")
+    total_to_process = min(target_count, len(matched_feeds))
+    for idx, feed_url in enumerate(matched_feeds[:target_count]):
+        calc_progress = int(30 + ((idx + 1) / total_to_process) * 60)
+        scraper.log(f"Connecting to RSS feed endpoint: {feed_url}", progress=calc_progress)
         time.sleep(0.3)
         lead = scraper.parse_rss_feed(feed_url, client_id, niche, min_subs=min_subs, stage_immediately=stage_only)
         if lead:
             staged_results.append(lead)
 
     action_label = "staged for validation & review" if stage_only else "stored in database"
-    scraper.log(f"Pipeline completed: {len(staged_results)} qualified leads {action_label}", level="SUCCESS")
+    scraper.log(f"Pipeline completed: {len(staged_results)} qualified leads {action_label}", level="SUCCESS", progress=100)
     return staged_results
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PodConnect Autonomous Lead Scraper")
+    parser.add_argument("--tenant-id", default="tenant_default", help="Tenant / Workspace ID")
+    parser.add_argument("--job-id", default="", help="Scrape Job UUID")
     parser.add_argument("--client", default="C001", help="Client ID")
     parser.add_argument("--niche", default="B2B SaaS and Tech", help="Podcast Niche")
     parser.add_argument("--min-subs", type=int, default=1000, help="Minimum subscriber threshold")
@@ -610,10 +619,18 @@ if __name__ == "__main__":
     parser.add_argument("--direct-import", action="store_true", help="Bypass staging and import directly")
     args = parser.parse_args()
 
-    scraper = PodcastLeadScraper()
+    scraper = PodcastLeadScraper(tenant_id=args.tenant_id)
     if args.dump_json:
         print(json.dumps(scraper.get_leads(args.client)))
     elif args.dump_staged:
         print(json.dumps(scraper.get_staged_leads(args.client)))
     else:
-        run_discovery_pipeline(args.client, args.niche, args.min_subs, args.limit, stage_only=not args.direct_import)
+        run_discovery_pipeline(
+            args.client,
+            args.niche,
+            args.min_subs,
+            args.limit,
+            stage_only=not args.direct_import,
+            tenant_id=args.tenant_id,
+            job_id=args.job_id
+        )

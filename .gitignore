@@ -4,5 +4,11 @@ dist/
 coverage/
 .DS_Store
 *.log
+__pycache__/
+*.pyc
 .env*
 !.env.example
+
+# SQLite temporary runtime lock files
+*.db-wal
+*.db-shm

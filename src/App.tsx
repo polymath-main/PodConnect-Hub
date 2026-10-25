@@ -9,14 +9,21 @@ import { OutreachHubView } from './components/OutreachHubView';
 import { CalendarMilestonesView } from './components/CalendarMilestonesView';
 import { WorkspaceHubView } from './components/WorkspaceHubView';
 import { ConfirmationModal } from './components/ConfirmationModal';
-import { Client, Lead, WorkspaceAuthUser } from './types';
+import { WorkspaceSwitcherModal } from './components/tenants/WorkspaceSwitcherModal';
+import { Client, Lead, WorkspaceAuthUser, Tenant } from './types';
 import { initAuth, googleSignIn, logout, fetchClientsFromFirestore, saveClientToFirestore } from './lib/firebase';
 import { findOrCreateMasterSheet } from './lib/workspace';
+import { api } from './lib/api';
 import { FileSpreadsheet, Search, Send, Calendar, PlusCircle, Users } from 'lucide-react';
 
 export default function App() {
   const [currentView, setCurrentView] = useState<string>('clients');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState<boolean>(false);
+
+  // Multi-Tenant Workspace State
+  const [tenants, setTenants] = useState<Tenant[]>([]);
+  const [activeTenant, setActiveTenant] = useState<Tenant | null>(null);
+  const [isWorkspaceModalOpen, setIsWorkspaceModalOpen] = useState<boolean>(false);
 
   // Initial client record to ensure immediate operational populated state
   const [clients, setClients] = useState<Client[]>([
@@ -122,8 +129,23 @@ export default function App() {
     isLoading: false,
   });
 
-  // Initialize Firebase Auth listener on app load
+  const loadTenants = async () => {
+    try {
+      const res = await api.getTenants();
+      if (res.success && res.tenants.length > 0) {
+        setTenants(res.tenants);
+        const current = res.tenants.find((t) => t.id === res.activeTenantId) || res.tenants[0];
+        setActiveTenant(current);
+        api.setTenantId(current.id);
+      }
+    } catch (err) {
+      console.warn('Failed to load workspaces:', err);
+    }
+  };
+
+  // Initialize Firebase Auth & Workspaces listener on app load
   useEffect(() => {
+    loadTenants();
     const unsubscribe = initAuth(
       async (user, _token) => {
         setAuthUser({
@@ -132,6 +154,11 @@ export default function App() {
           photoURL: user.photoURL,
           uid: user.uid,
         });
+
+        if (user) {
+          api.setUserContext(user.uid, user.email || '');
+          loadTenants();
+        }
 
         // Sync with Cloud Firestore
         try {
@@ -148,6 +175,8 @@ export default function App() {
       },
       () => {
         setAuthUser(null);
+        api.setUserContext('operator_system', 'operator@podconnect.agency');
+        loadTenants();
       }
     );
     return () => unsubscribe();
@@ -271,6 +300,8 @@ export default function App() {
         onQuickAction={() => setCurrentView('onboarding')}
         isMobileMenuOpen={isMobileMenuOpen}
         onToggleMobileMenu={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+        activeTenant={activeTenant}
+        onOpenWorkspaceSwitcher={() => setIsWorkspaceModalOpen(true)}
       />
 
       {authError && (
@@ -441,6 +472,19 @@ export default function App() {
           setConfirmationState((prev) => ({ ...prev, isOpen: false, isLoading: false }))
         }
         isLoading={confirmationState.isLoading}
+      />
+
+      {/* Multi-Tenant Workspace & Team Switcher Modal */}
+      <WorkspaceSwitcherModal
+        isOpen={isWorkspaceModalOpen}
+        onClose={() => setIsWorkspaceModalOpen(false)}
+        activeTenant={activeTenant}
+        onSelectTenant={(t) => {
+          setActiveTenant(t);
+          api.setTenantId(t.id);
+        }}
+        tenants={tenants}
+        onTenantsUpdated={loadTenants}
       />
     </div>
   );

@@ -22,6 +22,8 @@ import {
 } from 'lucide-react';
 import { Lead, Client } from '../../types';
 import { LeadEditModal } from './LeadEditModal';
+import { api } from '../../lib/api';
+import { useToast } from '../ui/Toast';
 
 interface CentralLeadBankViewProps {
   clients: Client[];
@@ -47,23 +49,23 @@ export const CentralLeadBankView: React.FC<CentralLeadBankViewProps> = ({
   const [targetClientId, setTargetClientId] = useState<string>('');
   const [editingLead, setEditingLead] = useState<Lead | null>(null);
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const { toast } = useToast();
 
   const fetchLeads = async () => {
     setLoading(true);
     try {
-      const params = new URLSearchParams();
-      if (selectedNiche !== 'ALL') params.append('niche', selectedNiche);
-      if (selectedTag) params.append('tag', selectedTag);
-      if (selectedStatus !== 'ALL') params.append('status', selectedStatus);
-      if (selectedClientFilter !== 'ALL') params.append('clientId', selectedClientFilter);
-      if (searchQuery) params.append('search', searchQuery);
-
-      const res = await fetch(`/api/leads?${params.toString()}`);
-      if (!res.ok) throw new Error('Failed to load core lead database');
-      const data = await res.json();
-      setLeads(data);
+      const data = await api.getLeads({
+        clientId: selectedClientFilter !== 'ALL' ? selectedClientFilter : undefined,
+        niche: selectedNiche !== 'ALL' ? selectedNiche : undefined,
+        tag: selectedTag || undefined,
+        status: selectedStatus !== 'ALL' ? selectedStatus : undefined,
+        search: searchQuery || undefined,
+      });
+      setLeads(data.leads || []);
     } catch (err: any) {
-      setStatusMessage({ type: 'error', text: err.message });
+      const msg = err.message || 'Failed to load core lead database';
+      setStatusMessage({ type: 'error', text: msg });
+      toast.error(msg);
     } finally {
       setLoading(false);
     }
@@ -99,57 +101,59 @@ export const CentralLeadBankView: React.FC<CentralLeadBankViewProps> = ({
   const handleAssignToClient = async () => {
     if (selectedLeadIds.length === 0) {
       setStatusMessage({ type: 'error', text: 'Select leads to assign.' });
+      toast.warning('Select leads to assign.');
       return;
     }
     if (!targetClientId) {
       setStatusMessage({ type: 'error', text: 'Select a target client profile.' });
+      toast.warning('Select a target client profile.');
       return;
     }
 
     try {
-      const res = await fetch('/api/leads/assign-client', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ leadIds: selectedLeadIds, clientId: targetClientId }),
-      });
-      if (!res.ok) throw new Error('Failed to re-assign leads to client');
+      await api.assignLeadsToClient(selectedLeadIds, targetClientId);
+      const successText = `Successfully re-assigned ${selectedLeadIds.length} lead(s) to Client ${targetClientId}`;
       setStatusMessage({
         type: 'success',
-        text: `Successfully re-assigned ${selectedLeadIds.length} lead(s) to Client ${targetClientId}`,
+        text: successText,
       });
+      toast.success(successText);
       setSelectedLeadIds([]);
       fetchLeads();
     } catch (err: any) {
-      setStatusMessage({ type: 'error', text: err.message });
+      const msg = err.message || 'Failed to re-assign leads to client';
+      setStatusMessage({ type: 'error', text: msg });
+      toast.error(msg);
     }
   };
 
   const handleEditSave = async (updatedData: Partial<Lead>) => {
     if (!editingLead) return;
     try {
-      const res = await fetch(`/api/leads/${editingLead.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updatedData),
-      });
-      if (!res.ok) throw new Error('Failed to update lead');
-      setStatusMessage({ type: 'success', text: `Updated ${editingLead.showName}` });
+      await api.updateLead(editingLead.id, updatedData);
+      const successText = `Updated ${editingLead.showName}`;
+      setStatusMessage({ type: 'success', text: successText });
+      toast.success(successText);
       setEditingLead(null);
       fetchLeads();
     } catch (err: any) {
-      setStatusMessage({ type: 'error', text: err.message });
+      const msg = err.message || 'Failed to update lead';
+      setStatusMessage({ type: 'error', text: msg });
+      toast.error(msg);
     }
   };
 
   const handleDeleteLead = async (id: number) => {
     if (!confirm('Are you sure you want to remove this lead from the core database?')) return;
     try {
-      const res = await fetch(`/api/leads/${id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Failed to delete lead');
+      await api.deleteLead(id);
       setStatusMessage({ type: 'success', text: 'Lead deleted from database.' });
+      toast.success('Lead deleted from database.');
       fetchLeads();
     } catch (err: any) {
-      setStatusMessage({ type: 'error', text: err.message });
+      const msg = err.message || 'Failed to delete lead';
+      setStatusMessage({ type: 'error', text: msg });
+      toast.error(msg);
     }
   };
 

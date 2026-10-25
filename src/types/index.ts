@@ -89,6 +89,7 @@ export type LeadStatus =
 
 export interface Lead {
   id: number;
+  tenantId?: string;
   clientId: string;
   showName: string;
   hostName: string;
@@ -109,6 +110,7 @@ export interface Lead {
 
 export interface StagedLead {
   id: number;
+  tenantId?: string;
   clientId: string;
   showName: string;
   hostName: string;
@@ -137,7 +139,7 @@ export interface ClientICP {
 export interface ScrapeLog {
   id?: string;
   timestamp: string;
-  level: 'INFO' | 'WARN' | 'SUCCESS' | 'RAW';
+  level: 'INFO' | 'WARN' | 'SUCCESS' | 'ERROR' | 'RAW';
   message: string;
   lead?: any;
 }
@@ -158,3 +160,60 @@ export interface WorkspaceAuthUser {
   photoURL: string | null;
   uid: string;
 }
+
+// ==========================================
+// SAAS MULTI-TENANCY & JOB QUEUE TYPES
+// ==========================================
+
+export type UserRole = 'owner' | 'admin' | 'manager' | 'member' | 'viewer';
+
+export interface Tenant {
+  id: string;
+  name: string;
+  slug: string;
+  plan: 'starter' | 'growth' | 'agency' | 'enterprise';
+  ownerUserId: string;
+  createdAt: string;
+  memberCount?: number;
+  currentRole?: UserRole;
+}
+
+export interface TenantMember {
+  id: number;
+  tenantId: string;
+  userId: string;
+  email: string;
+  role: UserRole;
+  createdAt: string;
+}
+
+export type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+
+export interface ScrapeJob {
+  id: string;
+  tenantId: string;
+  userId: string;
+  clientId: string;
+  jobType: 'scraper' | 'search_grounding';
+  niche: string;
+  minSubs: number;
+  targetCount: number;
+  status: JobStatus;
+  progress: number;
+  foundCount: number;
+  stagedCount: number;
+  errorMessage?: string | null;
+  createdAt: string;
+  startedAt?: string | null;
+  completedAt?: string | null;
+}
+
+export interface JobLogEntry {
+  id: number;
+  jobId: string;
+  timestamp: string;
+  level: 'INFO' | 'WARN' | 'SUCCESS' | 'ERROR' | 'RAW';
+  message: string;
+  metadata?: any;
+}
+

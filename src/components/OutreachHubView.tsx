@@ -21,6 +21,8 @@ import {
 import { Client, Lead, PitchDraft } from '../types';
 import { sendGmailPitch, createGmailDraft, createOutreachStrategyDoc } from '../lib/workspace';
 import { getAccessToken } from '../lib/firebase';
+import { api } from '../lib/api';
+import { useToast } from './ui/Toast';
 
 interface OutreachHubViewProps {
   clients: Client[];
@@ -80,6 +82,7 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
   const [isBatchRunning, setIsBatchRunning] = useState(false);
   const [batchProgress, setBatchProgress] = useState<{ current: number; total: number }>({ current: 0, total: 0 });
   const [batchLogs, setBatchLogs] = useState<string[]>([]);
+  const { toast } = useToast();
 
   // Docs Export State
   const [isExportingDocs, setIsExportingDocs] = useState(false);
@@ -141,14 +144,13 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
   const loadLeads = async (clientId?: string) => {
     setIsLoadingLeads(true);
     try {
-      const url = clientId ? `/api/leads?client_id=${clientId}` : '/api/leads';
-      const res = await fetch(url);
-      const json = await res.json();
-      if (json.success && Array.isArray(json.leads)) {
-        setLeads(json.leads);
+      const data = await api.getLeads({ clientId });
+      if (Array.isArray(data.leads)) {
+        setLeads(data.leads);
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to load leads for outreach:', err);
+      toast.error(err.message || 'Failed to load leads');
     } finally {
       setIsLoadingLeads(false);
     }
@@ -159,11 +161,7 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
    */
   const handleUpdateLeadStatus = async (lead: Lead, newStatus: string) => {
     try {
-      await fetch('/api/leads/update-status', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: lead.id, status: newStatus }),
-      });
+      await api.updateLeadStatus(lead.id, newStatus);
 
       setLeads((prev) =>
         prev.map((l) => (l.id === lead.id ? { ...l, status: newStatus as any } : l))
@@ -250,21 +248,16 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
     setSendSuccessMessage(null);
 
     try {
-      const res = await fetch('/api/gemini/generate-pitch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          clientName: activeClient?.name || 'Client',
-          niche: activeClient?.niche || lead.niche,
-          messagePillars: activeClient?.messagePillars || ['Key industry insights and lessons'],
-          credibilityAssets: activeClient?.credibilityAssets || ['Track record of scaling and impact'],
-          showName: lead.showName,
-          hostName: lead.hostName,
-        }),
+      const json = await api.generatePitch({
+        clientName: activeClient?.name || 'Client',
+        niche: activeClient?.niche || lead.niche,
+        messagePillars: activeClient?.messagePillars || ['Key industry insights and lessons'],
+        credibilityAssets: activeClient?.credibilityAssets || ['Track record of scaling and impact'],
+        showName: lead.showName,
+        hostName: lead.hostName,
       });
 
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error || 'Pitch generation failed');
+      if (!json || !json.pitch) throw new Error(json?.error || 'Pitch generation failed');
 
       setPitchDraft({
         leadId: lead.id,
@@ -276,8 +269,11 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
         talkingPoints: json.pitch.talkingPoints || [],
       });
       handleUpdateLeadStatus(lead, 'Pitch Drafted');
+      toast.success(`Generated pitch draft for ${lead.showName}`);
     } catch (err: any) {
-      setOutreachError(`Error generating pitch: ${err.message}`);
+      const msg = `Error generating pitch: ${err.message}`;
+      setOutreachError(msg);
+      toast.error(msg);
     } finally {
       setIsGeneratingPitch(false);
     }
@@ -293,6 +289,7 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
 
     if (!pitchDraft.recipientEmail) {
       setOutreachError('Please provide a recipient email address for this host.');
+      toast.warning('Please provide a recipient email address for this host.');
       return;
     }
 
@@ -307,15 +304,27 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
       onConfirm: async () => {
         setIsSendingEmail(true);
         try {
-          await sendGmailPitch(pitchDraft.recipientEmail, pitchDraft.subject, pitchDraft.body);
+          const accessToken = await getAccessToken();
+          if (!accessToken) throw new Error('OAuth access token unavailable. Please sign in again.');
+
+          await api.dispatchPitch(pitchDraft.leadId, {
+            accessToken,
+            subject: pitchDraft.subject,
+            body: pitchDraft.body,
+          });
+
           const currentLead = leads.find((l) => l.id === pitchDraft.leadId);
           if (currentLead) {
-            await handleUpdateLeadStatus(currentLead, 'Sent');
+            await handleUpdateLeadStatus(currentLead, 'Dispatched');
           }
-          setSendSuccessMessage(`Pitch email sent successfully via Gmail API!`);
+          const successMsg = `Pitch email dispatched successfully via Gmail relay!`;
+          setSendSuccessMessage(successMsg);
+          toast.success(successMsg);
           checkGmailSyncStatus();
         } catch (err: any) {
-          alert(`Gmail dispatch failed: ${err.message}`);
+          const errText = `Gmail dispatch failed: ${err.message}`;
+          setOutreachError(errText);
+          toast.error(errText);
         } finally {
           setIsSendingEmail(false);
         }
@@ -385,28 +394,32 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
           setBatchProgress({ current: i + 1, total: selectedLeads.length });
 
           try {
-            const res = await fetch('/api/gemini/generate-pitch', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                clientName: activeClient?.name || 'Client',
-                niche: activeClient?.niche || target.niche,
-                messagePillars: activeClient?.messagePillars || [],
-                credibilityAssets: activeClient?.credibilityAssets || [],
-                showName: target.showName,
-                hostName: target.hostName,
-              }),
+            const json = await api.generatePitch({
+              clientName: activeClient?.name || 'Client',
+              niche: activeClient?.niche || target.niche,
+              messagePillars: activeClient?.messagePillars || [],
+              credibilityAssets: activeClient?.credibilityAssets || [],
+              showName: target.showName,
+              hostName: target.hostName,
             });
-            const json = await res.json();
             const pitch = json.pitch;
 
             if (target.email) {
-              await sendGmailPitch(target.email, pitch.subject, pitch.body);
-              await handleUpdateLeadStatus(target, 'Sent');
-              setBatchLogs((prev) => [
-                ...prev,
-                `✓ [SENT] ${target.showName} (${target.email})`,
-              ]);
+              const accessToken = await getAccessToken();
+              if (accessToken) {
+                await api.dispatchPitch(target.id, {
+                  accessToken,
+                  subject: pitch.subject,
+                  body: pitch.body,
+                });
+                await handleUpdateLeadStatus(target, 'Dispatched');
+                setBatchLogs((prev) => [
+                  ...prev,
+                  `✓ [DISPATCHED] ${target.showName} (${target.email})`,
+                ]);
+              } else {
+                throw new Error('OAuth access token unavailable');
+              }
             } else {
               await createGmailDraft('contact@' + target.showName.toLowerCase().replace(/[^a-z]/g, '') + '.com', pitch.subject, pitch.body);
               await handleUpdateLeadStatus(target, 'Pitch Drafted');
@@ -463,20 +476,15 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
         try {
           const generatedPitches = [];
           for (const l of targetLeads.slice(0, 10)) {
-            const res = await fetch('/api/gemini/generate-pitch', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                clientName: activeClient.name,
-                niche: activeClient.niche,
-                messagePillars: activeClient.messagePillars,
-                credibilityAssets: activeClient.credibilityAssets,
-                showName: l.showName,
-                hostName: l.hostName,
-              }),
+            const json = await api.generatePitch({
+              clientName: activeClient.name,
+              niche: activeClient.niche,
+              messagePillars: activeClient.messagePillars,
+              credibilityAssets: activeClient.credibilityAssets,
+              showName: l.showName,
+              hostName: l.hostName,
             });
-            const json = await res.json();
-            if (json.pitch) {
+            if (json && json.pitch) {
               generatedPitches.push({
                 showName: l.showName,
                 hostName: l.hostName,

@@ -1,10 +1,13 @@
-import express, { Request, Response } from 'express';
+import express, { type Request, type Response } from 'express';
 import { GoogleGenAI, Type } from '@google/genai';
-import { spawn } from 'child_process';
 import path from 'path';
-import fs from 'fs';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import { dbService } from './src/server/db.js';
+import { jobQueue } from './src/server/queue.js';
+import { authMiddleware, requireRole, requireQuota, type AuthenticatedRequest } from './src/server/auth.js';
+import { emailService } from './src/server/email.js';
+import { getLimits } from './src/lib/plans.js';
 
 dotenv.config();
 
@@ -26,385 +29,420 @@ const ai = new GoogleGenAI({
   },
 });
 
-// In-memory SSE clients for real-time live terminal streaming
-interface SSEClient {
-  id: number;
-  res: Response;
-}
-let sseClients: SSEClient[] = [];
-let nextClientId = 1;
-
-function broadcastLog(data: any) {
-  const message = `data: ${JSON.stringify(data)}\n\n`;
-  sseClients.forEach((client) => {
-    try {
-      client.res.write(message);
-    } catch {
-      // Ignore write errors to dead clients
-    }
-  });
-}
-
-// Ensure database exists initially
-function initDatabase() {
-  const p = spawn('python3', [
-    path.join(__dirname, 'scraper.py'),
-    '--dump-json',
-  ]);
-  p.on('error', (err) => console.error('Python init error:', err));
-}
-initDatabase();
-
-// --- API ROUTES ---
-
-// Health check
+// Health check (public)
 app.get('/api/health', (_req: Request, res: Response) => {
-  res.json({ status: 'ok', service: 'PodConnect Hub AI Backend' });
-});
-
-// SSE endpoint for live scraping logs
-app.get('/api/scrape/stream', (req: Request, res: Response) => {
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.flushHeaders();
-
-  const clientId = nextClientId++;
-  const newClient: SSEClient = { id: clientId, res };
-  sseClients.push(newClient);
-
-  // Initial handshake event
-  res.write(`data: ${JSON.stringify({ type: 'connected', message: 'Live scrape telemetry connected' })}\n\n`);
-
-  req.on('close', () => {
-    sseClients = sseClients.filter((c) => c.id !== clientId);
+  res.json({
+    status: 'ok',
+    service: 'PodConnect Hub AI SaaS Platform',
+    version: '2.0.0',
+    queue: {
+      active: jobQueue.getActiveCount(),
+      queued: jobQueue.getQueuedCount(),
+    },
+    db: 'connected',
+    uptime: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
   });
 });
 
-// Helper to run python code directly
-function runPythonCode(code: string, args: string[] = []): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const py = spawn('python3', ['-c', code, ...args]);
-    let stdout = '';
-    let stderr = '';
-    py.stdout.on('data', (d) => { stdout += d.toString(); });
-    py.stderr.on('data', (d) => { stderr += d.toString(); });
-    py.on('close', (code) => {
-      if (code === 0) resolve(stdout.trim());
-      else reject(new Error(stderr || `Python exited with code ${code}`));
-    });
-  });
-}
+// Apply Authentication & Multi-Tenant Middleware to all other /api routes
+app.use('/api', authMiddleware as any);
 
-// 1. Retrieve Staged Leads (Pre-Import Holding Area)
-app.get('/api/staged-leads', async (req: Request, res: Response) => {
-  const clientId = (req.query.client_id as string) || '';
-  const code = `
-from scraper import PodcastLeadScraper
-import json, sys
-scraper = PodcastLeadScraper()
-client_id = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else None
-leads = scraper.get_staged_leads(client_id)
-print(json.dumps(leads))
-`;
+// ==========================================
+// 1. TENANTS & WORKSPACE MANAGEMENT
+// ==========================================
+
+// Get all workspaces for the authenticated user
+app.get('/api/tenants', (req: AuthenticatedRequest, res: Response) => {
   try {
-    const output = await runPythonCode(code, [clientId]);
-    const stagedLeads = JSON.parse(output || '[]');
+    const tenants = dbService.getTenantsForUser(req.user!.uid, req.user!.email);
+    res.json({
+      success: true,
+      activeTenantId: req.tenantId,
+      currentRole: req.userRole,
+      tenants,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to list workspaces' });
+  }
+});
+
+// Create a new workspace
+app.post('/api/tenants', (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { name, slug, plan = 'growth' } = req.body;
+    if (!name || !slug) {
+      return res.status(400).json({ error: 'Workspace name and slug are required' });
+    }
+
+    const tenant = dbService.createTenant(name, slug, req.user!.uid, req.user!.email, plan);
+    res.json({ success: true, tenant });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to create workspace' });
+  }
+});
+
+// Get members of active workspace
+app.get('/api/tenants/:id/members', (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const tenantId = req.params.id || req.tenantId!;
+    const members = dbService.getTenantMembers(tenantId);
+    res.json({ success: true, tenantId, members });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to list workspace members' });
+  }
+});
+
+// Invite / add a member to workspace (Admins & Owners only)
+app.post(
+  '/api/tenants/:id/members',
+  requireRole(['owner', 'admin']) as any,
+  requireQuota('seat') as any,
+  (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const tenantId = req.params.id || req.tenantId!;
+      const { email, role = 'member' } = req.body;
+      if (!email) {
+        return res.status(400).json({ error: 'Member email is required' });
+      }
+
+      const member = dbService.addTenantMember(tenantId, email, role);
+      res.json({ success: true, member });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to add workspace member' });
+    }
+  }
+);
+
+// Get tenant billing and quota status
+app.get('/api/billing/status', (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const tenant = dbService.getTenantById(req.tenantId!);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+    const limits = getLimits(tenant.plan);
+    const jobsToday = dbService.getJobCountToday(req.tenantId!);
+    const memberCount = dbService.getTenantMemberCount(req.tenantId!);
+    res.json({
+      success: true,
+      plan: tenant.plan,
+      limits,
+      usage: {
+        jobsToday,
+        memberCount,
+      },
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to get billing status' });
+  }
+});
+
+// ==========================================
+// 2. STAGED LEADS (HOLDING AREA)
+// ==========================================
+
+// Retrieve staged leads (filtered by tenant and optionally by client)
+app.get('/api/staged-leads', (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const clientId = (req.query.client_id as string) || '';
+    const stagedLeads = dbService.getStagedLeads(req.tenantId!, clientId);
     res.json({ success: true, count: stagedLeads.length, stagedLeads });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message || 'Failed to retrieve staged leads' });
   }
 });
 
-// 2. Edit a Staged Lead before approval
-app.put('/api/staged-leads/:id', async (req: Request, res: Response) => {
-  const stagedId = parseInt(req.params.id);
-  const data = req.body;
-  if (!stagedId || !data) {
-    return res.status(400).json({ error: 'Valid staged lead ID and update data required' });
-  }
-
-  const code = `
-from scraper import PodcastLeadScraper
-import json, sys
-scraper = PodcastLeadScraper()
-staged_id = int(sys.argv[1])
-data = json.loads(sys.argv[2])
-ok = scraper.edit_staged_lead(staged_id, data)
-print("OK" if ok else "FAIL")
-`;
+// Edit a staged lead before approval
+app.put('/api/staged-leads/:id', (req: AuthenticatedRequest, res: Response) => {
   try {
-    await runPythonCode(code, [stagedId.toString(), JSON.stringify(data)]);
+    const stagedId = parseInt(req.params.id);
+    const data = req.body;
+    if (!stagedId || !data) {
+      return res.status(400).json({ error: 'Valid staged lead ID and update data required' });
+    }
+
+    dbService.updateStagedLead(req.tenantId!, stagedId, data);
     res.json({ success: true, id: stagedId, data });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to edit staged lead' });
   }
 });
 
-// 3. Remove/Discard a Staged Lead
-app.delete('/api/staged-leads/:id', async (req: Request, res: Response) => {
-  const stagedId = parseInt(req.params.id);
-  const code = `
-from scraper import PodcastLeadScraper
-import sys
-scraper = PodcastLeadScraper()
-staged_id = int(sys.argv[1])
-scraper.delete_staged_lead(staged_id)
-print("DELETED")
-`;
+// Discard/delete a staged lead
+app.delete('/api/staged-leads/:id', (req: AuthenticatedRequest, res: Response) => {
   try {
-    await runPythonCode(code, [stagedId.toString()]);
+    const stagedId = parseInt(req.params.id);
+    dbService.deleteStagedLead(req.tenantId!, stagedId);
     res.json({ success: true, id: stagedId, message: 'Staged lead discarded' });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to delete staged lead' });
   }
 });
 
-// 4. Approval Gate: Commit Selected Staged Leads into Core Leads Database
-app.post('/api/staged-leads/import', async (req: Request, res: Response) => {
-  const { stagedIds, targetClientId } = req.body;
-  if (!Array.isArray(stagedIds) || stagedIds.length === 0) {
-    return res.status(400).json({ error: 'stagedIds array is required' });
-  }
-
-  const code = `
-from scraper import PodcastLeadScraper
-import json, sys
-scraper = PodcastLeadScraper()
-ids = json.loads(sys.argv[1])
-imported = scraper.import_staged_leads(ids)
-print(json.dumps(imported))
-`;
+// Approval Gate: Commit selected staged leads into core database
+app.post('/api/staged-leads/import', (req: AuthenticatedRequest, res: Response) => {
   try {
-    const output = await runPythonCode(code, [JSON.stringify(stagedIds)]);
-    const importedLeads = JSON.parse(output || '[]');
-    broadcastLog({
-      timestamp: new Date().toISOString(),
-      level: 'SUCCESS',
-      message: `[IMPORT APPROVED] ${importedLeads.length} leads committed to core database`,
+    const stagedIds = req.body.stagedIds || req.body.ids;
+    if (!Array.isArray(stagedIds) || stagedIds.length === 0) {
+      return res.status(400).json({ error: 'stagedIds or ids array is required' });
+    }
+
+    const importedLeads = dbService.importStagedLeads(req.tenantId!, stagedIds);
+    res.json({
+      success: true,
+      count: importedLeads.length,
+      importedCount: importedLeads.length,
+      importedLeads,
     });
-    res.json({ success: true, count: importedLeads.length, importedLeads });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to import staged leads' });
   }
 });
 
-// 5. Centralized Core Leads Database: Query with Niche, Tag, Status, Search Filters
-app.get('/api/leads', async (req: Request, res: Response) => {
-  const clientId = (req.query.client_id as string) || '';
-  const niche = (req.query.niche as string) || '';
-  const tag = (req.query.tag as string) || '';
-  const status = (req.query.status as string) || '';
-  const search = (req.query.search as string) || '';
+// ==========================================
+// 3. CORE LEADS DATABASE
+// ==========================================
 
-  const code = `
-from scraper import PodcastLeadScraper
-import json, sys
-scraper = PodcastLeadScraper()
-client_id = sys.argv[1] if sys.argv[1] else None
-niche = sys.argv[2] if sys.argv[2] else None
-tag = sys.argv[3] if sys.argv[3] else None
-status = sys.argv[4] if sys.argv[4] else None
-search = sys.argv[5] if sys.argv[5] else None
-
-leads = scraper.get_leads(client_id=client_id, niche=niche, tag=tag, status=status, search=search)
-print(json.dumps(leads))
-`;
+// Query core leads with search & category filters
+app.get('/api/leads', (req: AuthenticatedRequest, res: Response) => {
   try {
-    const output = await runPythonCode(code, [clientId, niche, tag, status, search]);
-    const leads = JSON.parse(output || '[]');
+    const clientId = (req.query.client_id as string) || (req.query.clientId as string) || '';
+    const niche = (req.query.niche as string) || '';
+    const tag = (req.query.tag as string) || '';
+    const status = (req.query.status as string) || '';
+    const search = (req.query.search as string) || '';
+
+    const leads = dbService.getLeads(req.tenantId!, { clientId, niche, tag, status, search });
     res.json({ success: true, count: leads.length, leads });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message || 'Failed to query core leads' });
   }
 });
 
-// 6. Update Core Lead (details, notes, tags, status)
-app.put('/api/leads/:id', async (req: Request, res: Response) => {
-  const leadId = parseInt(req.params.id);
-  const data = req.body;
-
-  const code = `
-import sqlite3, json, sys
-lead_id = int(sys.argv[1])
-data = json.loads(sys.argv[2])
-conn = sqlite3.connect("podconnect_leads.db")
-c = conn.cursor()
-
-tags_json = json.dumps(data.get("tags") or []) if "tags" in data else None
-updates = []
-vals = []
-
-for key in ["show_name", "host_name", "platform", "show_url", "email", "subscribers", "niche", "score", "status", "notes", "location"]:
-    camel = "".join([w.capitalize() if i > 0 else w for i, w in enumerate(key.split("_"))])
-    if camel in data:
-        updates.append(f"{key} = ?")
-        vals.append(data[camel])
-    elif key in data:
-        updates.append(f"{key} = ?")
-        vals.append(data[key])
-
-if tags_json is not None:
-    updates.append("tags = ?")
-    vals.append(tags_json)
-
-if updates:
-    query = f"UPDATE leads SET {', '.join(updates)} WHERE id = ?"
-    vals.append(lead_id)
-    c.execute(query, tuple(vals))
-    conn.commit()
-
-print("UPDATED")
-`;
+// Update core lead
+app.put('/api/leads/:id', (req: AuthenticatedRequest, res: Response) => {
   try {
-    await runPythonCode(code, [leadId.toString(), JSON.stringify(data)]);
+    const leadId = parseInt(req.params.id);
+    const data = req.body;
+    dbService.updateLead(req.tenantId!, leadId, data);
     res.json({ success: true, id: leadId, data });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to update lead' });
   }
 });
 
-// 7. Delete Core Lead
-app.delete('/api/leads/:id', async (req: Request, res: Response) => {
-  const leadId = parseInt(req.params.id);
-  const code = `
-import sqlite3, sys
-conn = sqlite3.connect("podconnect_leads.db")
-c = conn.cursor()
-c.execute("DELETE FROM leads WHERE id = ?", (sys.argv[1],))
-conn.commit()
-print("DELETED")
-`;
+// Delete core lead
+app.delete('/api/leads/:id', (req: AuthenticatedRequest, res: Response) => {
   try {
-    await runPythonCode(code, [leadId.toString()]);
+    const leadId = parseInt(req.params.id);
+    dbService.deleteLead(req.tenantId!, leadId);
     res.json({ success: true, id: leadId });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to delete lead' });
   }
 });
 
-// 8. Re-assign or Link Lead from Central Bank to Client Campaign
-app.post('/api/leads/assign-client', async (req: Request, res: Response) => {
-  const { leadId, targetClientId } = req.body;
-  if (!leadId || !targetClientId) {
-    return res.status(400).json({ error: 'leadId and targetClientId required' });
-  }
-
-  const code = `
-import sqlite3, sys
-conn = sqlite3.connect("podconnect_leads.db")
-c = conn.cursor()
-c.execute("SELECT show_name, host_name, platform, show_url, feed_url, email, subscribers, niche, tags, score, location FROM leads WHERE id = ?", (sys.argv[1],))
-row = c.fetchone()
-if row:
-    c.execute("""
-        INSERT INTO leads (client_id, show_name, host_name, platform, show_url, feed_url, email, subscribers, niche, tags, score, status, location)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Imported', ?)
-        ON CONFLICT(client_id, show_name) DO UPDATE SET client_id = excluded.client_id
-    """, (sys.argv[2], row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9], row[10]))
-    conn.commit()
-    print("ASSIGNED")
-else:
-    print("NOT_FOUND")
-`;
+// Re-assign or duplicate lead from Central Bank to specific client campaign
+app.post('/api/leads/assign-client', (req: AuthenticatedRequest, res: Response) => {
   try {
-    const resOutput = await runPythonCode(code, [leadId.toString(), targetClientId]);
-    res.json({ success: true, status: resOutput });
+    const targetClientId = req.body.targetClientId || req.body.clientId;
+    const leadIds: any[] = req.body.leadIds || (req.body.leadId ? [req.body.leadId] : []);
+    if (!targetClientId || leadIds.length === 0) {
+      return res.status(400).json({ error: 'leadId/leadIds and targetClientId/clientId required' });
+    }
+
+    let assignedCount = 0;
+    for (const lid of leadIds) {
+      const ok = dbService.assignLeadToClient(req.tenantId!, parseInt(lid), targetClientId);
+      if (ok) assignedCount++;
+    }
+    res.json({ success: true, assignedCount });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to assign lead' });
   }
 });
 
-// 9. Quick update lead status (e.g., Contacted, Converted, Booked, Passed)
-app.post('/api/leads/update-status', async (req: Request, res: Response) => {
-  const { id, status } = req.body;
-  if (!id || !status) {
-    return res.status(400).json({ error: 'id and status required' });
-  }
-
-  const code = `
-import sqlite3, sys
-conn = sqlite3.connect("podconnect_leads.db")
-c = conn.cursor()
-c.execute("UPDATE leads SET status = ? WHERE id = ?", (sys.argv[1], sys.argv[2]))
-conn.commit()
-print("OK")
-`;
+// Quick status change
+app.post('/api/leads/update-status', (req: AuthenticatedRequest, res: Response) => {
   try {
-    await runPythonCode(code, [status, id.toString()]);
+    const { id, status } = req.body;
+    if (!id || !status) {
+      return res.status(400).json({ error: 'id and status required' });
+    }
+
+    dbService.updateLeadStatus(req.tenantId!, parseInt(id), status);
     res.json({ success: true, id, status });
   } catch (err: any) {
     res.status(500).json({ error: 'Failed to update lead status' });
   }
 });
 
+// Server-side pitch email dispatch via Gmail API with rate limiting
+app.post('/api/leads/:id/dispatch', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    const { accessToken, subject, body } = req.body;
 
-// Start scraper job
-let isScrapingActive = false;
-app.post('/api/scrape/start', (req: Request, res: Response) => {
-  const { clientId = 'C001', niche = 'B2B SaaS', minSubs = 1000, limit = 5 } = req.body;
-
-  if (isScrapingActive) {
-    return res.status(409).json({ error: 'A scraping job is already running' });
-  }
-
-  isScrapingActive = true;
-  broadcastLog({
-    timestamp: new Date().toISOString(),
-    level: 'INFO',
-    message: `[JOB START] Initiating multi-source discovery for client ${clientId} (${niche})`,
-  });
-
-  const py = spawn('python3', [
-    path.join(__dirname, 'scraper.py'),
-    '--client',
-    clientId,
-    '--niche',
-    niche,
-    '--min-subs',
-    minSubs.toString(),
-    '--limit',
-    limit.toString(),
-  ]);
-
-  py.stdout.on('data', (data) => {
-    const lines = data.toString().split('\n');
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        const parsed = JSON.parse(line.trim());
-        broadcastLog(parsed);
-      } catch {
-        broadcastLog({
-          timestamp: new Date().toISOString(),
-          level: 'RAW',
-          message: line.trim(),
-        });
-      }
+    if (!accessToken) {
+      return res.status(400).json({ error: 'OAuth accessToken is required' });
     }
-  });
+    if (!subject || !body) {
+      return res.status(400).json({ error: 'Email subject and body are required' });
+    }
 
-  py.stderr.on('data', (data) => {
-    broadcastLog({
-      timestamp: new Date().toISOString(),
-      level: 'WARN',
-      message: data.toString().trim(),
+    if (!emailService.checkRateLimit(req.tenantId!)) {
+      return res.status(429).json({ error: 'Rate limit exceeded: maximum 10 dispatches/minute per workspace' });
+    }
+
+    const lead = dbService.getLeadById(req.tenantId!, id);
+    if (!lead) {
+      return res.status(404).json({ error: 'Lead not found in current workspace' });
+    }
+    if (!lead.email) {
+      return res.status(400).json({ error: 'Lead does not have a contact email' });
+    }
+
+    const { messageId } = await emailService.sendViaGmail({
+      accessToken,
+      to: lead.email,
+      subject,
+      body,
     });
-  });
 
-  py.on('close', (code) => {
-    isScrapingActive = false;
-    broadcastLog({
-      timestamp: new Date().toISOString(),
-      level: 'SUCCESS',
-      message: `[JOB FINISHED] Scraper completed with exit code ${code}`,
+    dbService.updateLeadStatus(req.tenantId!, id, 'Dispatched');
+
+    res.json({
+      success: true,
+      messageId,
+      dispatchedTo: lead.email,
+      leadId: id,
     });
-  });
-
-  res.json({ success: true, message: 'Scraping job started', clientId, niche });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to dispatch email pitch' });
+  }
 });
 
-// AI Requirement Extraction from Client Transcripts / Agreements
+// ==========================================
+// 4. SCALABLE SCRAPER JOB QUEUE
+// ==========================================
+
+// Enqueue a new scraper job
+app.post('/api/scrape/jobs', requireQuota('job') as any, (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { clientId = 'C001', niche = 'B2B SaaS', minSubs = 1000, limit = 5 } = req.body;
+
+    const job = jobQueue.enqueueJob({
+      tenantId: req.tenantId!,
+      userId: req.user!.uid,
+      clientId,
+      niche,
+      minSubs: Number(minSubs),
+      targetCount: Number(limit),
+      jobType: 'scraper',
+    });
+
+    res.json({ success: true, job });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to enqueue scraping job' });
+  }
+});
+
+// Backward-compatible trigger for existing frontend calls
+app.post('/api/scrape/start', requireQuota('job') as any, (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { clientId = 'C001', niche = 'B2B SaaS', minSubs = 1000, limit = 5 } = req.body;
+
+    const job = jobQueue.enqueueJob({
+      tenantId: req.tenantId!,
+      userId: req.user!.uid,
+      clientId,
+      niche,
+      minSubs: Number(minSubs),
+      targetCount: Number(limit),
+      jobType: 'scraper',
+    });
+
+    res.json({
+      success: true,
+      message: 'Scraping job queued successfully in background pool',
+      jobId: job.id,
+      job,
+      clientId,
+      niche,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to start scraping job' });
+  }
+});
+
+// List jobs for the active workspace
+app.get('/api/scrape/jobs', (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const jobs = dbService.getJobs(req.tenantId!);
+    res.json({ success: true, count: jobs.length, jobs });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to list jobs' });
+  }
+});
+
+// Get job details and logs
+app.get('/api/scrape/jobs/:id', (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const job = dbService.getJobById(req.params.id);
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+    const logs = dbService.getJobLogs(job.id);
+    res.json({ success: true, job, logs });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to get job' });
+  }
+});
+
+// Cancel a running or pending job
+app.post('/api/scrape/jobs/:id/cancel', (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const success = jobQueue.cancelJob(req.params.id);
+    res.json({ success, message: success ? 'Job cancelled' : 'Job could not be cancelled' });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to cancel job' });
+  }
+});
+
+// SSE stream for a specific job
+app.get('/api/scrape/jobs/:id/stream', (req: AuthenticatedRequest, res: Response) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const jobId = req.params.id;
+  jobQueue.subscribeJob(jobId, res);
+
+  req.on('close', () => {
+    jobQueue.unsubscribeJob(jobId, res);
+  });
+});
+
+// General SSE stream for all workspace jobs (backward compatible with ScraperConsoleView)
+app.get('/api/scrape/stream', (req: AuthenticatedRequest, res: Response) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const tenantId = req.tenantId || 'tenant_default';
+  jobQueue.subscribeTenant(tenantId, res);
+
+  req.on('close', () => {
+    jobQueue.unsubscribeTenant(tenantId, res);
+  });
+});
+
+// ==========================================
+// 5. GEMINI AI APIS
+// ==========================================
+
+// AI Requirement Extraction from Client Transcripts
 app.post('/api/gemini/extract-transcript', async (req: Request, res: Response) => {
   try {
     const { transcript, clientSequence = 1 } = req.body;
@@ -413,7 +451,6 @@ app.post('/api/gemini/extract-transcript', async (req: Request, res: Response) =
     }
 
     const clientId = `C${String(clientSequence).padStart(3, '0')}`;
-
     const prompt = `
 You are PodConnect Hub AI, an autonomous enterprise podcast operations manager.
 Analyze the following client conversation logs, agreement notes, or onboarding transcript:
@@ -500,18 +537,12 @@ Extract structured project details in valid JSON:
 });
 
 // Live Podcast Discovery using Google Search Grounding with gemini-3.8-flash
-app.post('/api/gemini/discover-shows', async (req: Request, res: Response) => {
+app.post('/api/gemini/discover-shows', async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { niche, clientId = 'C001', minSubs = 1000 } = req.body;
     if (!niche) {
       return res.status(400).json({ error: 'Niche keyword is required' });
     }
-
-    broadcastLog({
-      timestamp: new Date().toISOString(),
-      level: 'INFO',
-      message: `[SEARCH GROUNDING] Querying live search data for active podcasts in niche: "${niche}"`,
-    });
 
     const prompt = `
 Find 5 real, active, high-relevance podcasts in the niche "${niche}" that accept guest interviews.
@@ -550,51 +581,37 @@ Format your response as a valid JSON array of objects:
     try {
       shows = JSON.parse(response.text || '[]');
     } catch {
-      // If parsing fails due to markdown wrapper
       const match = response.text?.match(/\[\s*\{.*\}\s*\]/s);
       if (match) {
         shows = JSON.parse(match[0]);
       }
     }
 
-    // Save discovered shows to SQLite via python script
+    // Direct in-process SQLite insertion with zero python subprocess overhead
+    const tenantId = req.tenantId || 'tenant_default';
     if (shows.length > 0) {
       for (const show of shows) {
-        const leadPayload = {
-          client_id: clientId,
-          show_name: show.showName || 'Active Podcast Show',
-          host_name: show.hostName || 'Show Host',
+        dbService.saveStagedLead(tenantId, {
+          clientId,
+          showName: show.showName || 'Active Podcast Show',
+          hostName: show.hostName || 'Show Host',
           platform: show.platform || 'Apple Podcasts',
-          show_url: show.showUrl || 'https://podcasts.apple.com',
-          feed_url: '',
+          showUrl: show.showUrl || 'https://podcasts.apple.com',
+          feedUrl: '',
           email: show.email || '',
           subscribers: show.subscribers || minSubs,
-          niche: niche,
-          tags: [niche.split(',')[0].trim(), show.platform || 'Apple Podcasts', 'Google Grounded', (show.subscribers || minSubs) >= 5000 ? 'High Reach' : 'Niche Target'],
+          niche,
+          tags: [
+            niche.split(',')[0].trim(),
+            show.platform || 'Apple Podcasts',
+            'Google Grounded',
+            (show.subscribers || minSubs) >= 5000 ? 'High Reach' : 'Niche Target',
+          ],
           score: 8.8,
           location: 'Global / Online',
-        };
-
-        const pyCode = `
-from scraper import PodcastLeadScraper
-import json, sys
-data = json.loads(sys.argv[1])
-scraper = PodcastLeadScraper()
-scraper.save_staged_lead(data)
-print("STAGED")
-`;
-        const py = spawn('python3', ['-c', pyCode, JSON.stringify(leadPayload)]);
-        py.on('close', () => {
-          broadcastLog({
-            timestamp: new Date().toISOString(),
-            level: 'INFO',
-            message: `[STAGED] Grounded show staged for review: ${leadPayload.show_name} (${leadPayload.host_name})`,
-            lead: leadPayload,
-          });
         });
       }
     }
-
 
     res.json({ success: true, count: shows.length, shows });
   } catch (error: any) {
@@ -629,7 +646,7 @@ Pitch Rules:
 Format output as JSON:
 {
   "subject": "Interview Pitch: [Compelling Angle] + [Client Name]",
-  "body": "Hi [Host],\n\n...",
+  "body": "Hi [Host],\\n\\n...",
   "talkingPoints": ["Point 1", "Point 2", "Point 3"]
 }
 `;
@@ -662,7 +679,10 @@ Format output as JSON:
   }
 });
 
-// --- Vite Middleware integration ---
+// ==========================================
+// 6. VITE MIDDLEWARE INTEGRATION
+// ==========================================
+
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
@@ -679,9 +699,24 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`PodConnect Hub AI server listening on http://0.0.0.0:${PORT}`);
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`PodConnect Hub AI SaaS platform listening on http://0.0.0.0:${PORT}`);
   });
+
+  const handleShutdown = (signal: string) => {
+    console.log(`[Server] ${signal} signal received. Initiating graceful shutdown...`);
+    server.close(() => {
+      console.log('[Server] HTTP server closed cleanly.');
+      process.exit(0);
+    });
+    setTimeout(() => {
+      console.error('[Server] Graceful shutdown timed out. Forcing process exit.');
+      process.exit(1);
+    }, 10000);
+  };
+
+  process.on('SIGTERM', () => handleShutdown('SIGTERM'));
+  process.on('SIGINT', () => handleShutdown('SIGINT'));
 }
 
 startServer().catch((err) => {

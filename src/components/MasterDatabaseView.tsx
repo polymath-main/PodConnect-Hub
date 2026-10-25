@@ -25,6 +25,7 @@ import {
 } from 'recharts';
 import { Client, Lead } from '../types';
 import { MASTER_SHEET_TITLE, findOrCreateMasterSheet, syncClientToMasterSheet } from '../lib/workspace';
+import { api } from '../lib/api';
 
 interface MasterDatabaseViewProps {
   clients: Client[];
@@ -69,10 +70,9 @@ export const MasterDatabaseView: React.FC<MasterDatabaseViewProps> = ({
   const loadLeads = async () => {
     setIsLoadingLeads(true);
     try {
-      const res = await fetch('/api/leads');
-      const json = await res.json();
-      if (json.success && Array.isArray(json.leads)) {
-        setAllLeads(json.leads);
+      const data = await api.getLeads();
+      if (Array.isArray(data.leads)) {
+        setAllLeads(data.leads);
       }
     } catch (err) {
       console.error('Failed to load leads for database analytics:', err);

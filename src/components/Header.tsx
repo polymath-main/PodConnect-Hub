@@ -1,6 +1,6 @@
 import React from 'react';
-import { LogOut, User as UserIcon, Menu, X, Plus } from 'lucide-react';
-import { WorkspaceAuthUser } from '../types';
+import { LogOut, User as UserIcon, Menu, X, Plus, Building2, ChevronDown } from 'lucide-react';
+import { WorkspaceAuthUser, Tenant } from '../types';
 
 interface HeaderProps {
   currentView: string;
@@ -12,6 +12,8 @@ interface HeaderProps {
   onQuickAction: () => void;
   isMobileMenuOpen: boolean;
   onToggleMobileMenu: () => void;
+  activeTenant?: Tenant | null;
+  onOpenWorkspaceSwitcher?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -24,6 +26,8 @@ export const Header: React.FC<HeaderProps> = ({
   onQuickAction,
   isMobileMenuOpen,
   onToggleMobileMenu,
+  activeTenant,
+  onOpenWorkspaceSwitcher,
 }) => {
   return (
     <header className="sticky top-0 z-40 w-full flex items-center justify-between gap-4 md:gap-8 px-4 sm:px-6 py-3 bg-slate-950/85 backdrop-blur-md border-b border-slate-800 min-h-[56px]">
@@ -44,10 +48,23 @@ export const Header: React.FC<HeaderProps> = ({
         >
           PodConnect Hub AI
         </button>
-        <span className="hidden sm:inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20">
-          <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
-          Firestore
-        </span>
+
+        {/* Tenant / Workspace Switcher Trigger */}
+        {activeTenant && (
+          <button
+            onClick={onOpenWorkspaceSwitcher}
+            className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700 transition-colors cursor-pointer"
+          >
+            <Building2 className="w-3.5 h-3.5 text-indigo-400" />
+            <span className="max-w-[120px] truncate">{activeTenant.name}</span>
+            {activeTenant.currentRole && (
+              <span className="px-1 py-0.2 rounded text-[9px] uppercase bg-indigo-500/20 text-indigo-300 font-semibold">
+                {activeTenant.currentRole}
+              </span>
+            )}
+            <ChevronDown className="w-3 h-3 text-slate-400" />
+          </button>
+        )}
       </div>
 
       {/* Zone 2: 4-5 concise single-line text nav links (Desktop / Tablet landscape) */}

@@ -22,10 +22,16 @@ import {
   Building2,
   MapPin,
   Users,
+  Clock,
+  Ban,
+  Activity,
+  Check,
 } from 'lucide-react';
-import { Client, Lead, StagedLead, ScrapeLog } from '../types';
+import { Client, Lead, StagedLead, ScrapeLog, ScrapeJob } from '../types';
 import { LeadStagingPanel } from './leads/LeadStagingPanel';
 import { CentralLeadBankView } from './leads/CentralLeadBankView';
+import { api } from '../lib/api';
+import { useToast } from './ui/Toast';
 
 interface ScraperConsoleViewProps {
   clients: Client[];
@@ -42,7 +48,7 @@ export const ScraperConsoleView: React.FC<ScraperConsoleViewProps> = ({
 }) => {
   const activeClient = clients.find((c) => c.id === activeClientId) || clients[0];
 
-  const [activeTab, setActiveTab] = useState<'console' | 'staging' | 'bank'>('console');
+  const [activeTab, setActiveTab] = useState<'console' | 'queue' | 'staging' | 'bank'>('console');
   const [nicheQuery, setNicheQuery] = useState(activeClient?.niche || 'B2B SaaS and AI');
   const [minSubs, setMinSubs] = useState<number>(activeClient?.minSubscribers || 1000);
   const [targetCount, setTargetCount] = useState<number>(10);
@@ -58,7 +64,9 @@ export const ScraperConsoleView: React.FC<ScraperConsoleViewProps> = ({
   const [logs, setLogs] = useState<ScrapeLog[]>([]);
   const [stagedLeads, setStagedLeads] = useState<StagedLead[]>([]);
   const [leads, setLeads] = useState<Lead[]>([]);
-  const [isLoadingLeads, setIsLoadingLeads] = useState(false);
+  const [jobs, setJobs] = useState<ScrapeJob[]>([]);
+  const [isLoadingJobs, setIsLoadingJobs] = useState(false);
+  const [selectedJobIdForLogs, setSelectedJobIdForLogs] = useState<string | null>(null);
 
   const terminalEndRef = useRef<HTMLDivElement>(null);
 
@@ -72,36 +80,82 @@ export const ScraperConsoleView: React.FC<ScraperConsoleViewProps> = ({
       loadLeads();
       loadStagedLeads();
     }
+    loadJobs();
   }, [activeClientId]);
 
+  // Real-time SSE Telemetry connection with robust reconnection backoff
   useEffect(() => {
-    const eventSource = new EventSource('/api/scrape/stream');
+    let reconnectTimer: any = null;
+    let attempts = 0;
+    const maxAttempts = 5;
+    let currentEventSource: EventSource | null = null;
+    let isCleanedUp = false;
 
-    eventSource.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.type === 'connected') return;
+    const connectSSE = () => {
+      if (isCleanedUp) return;
 
-        setLogs((prev) => [
-          ...prev.slice(-150),
-          {
+      const eventSource = new EventSource('/api/scrape/stream');
+      currentEventSource = eventSource;
+
+      eventSource.onopen = () => {
+        attempts = 0;
+      };
+
+      eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'connected') return;
+
+          // If job status updated or finished, refresh job queue and staged leads
+          if (data.type === 'job_queued' || data.type === 'job_started' || data.type === 'job_completed' || data.type === 'job_failed' || data.type === 'job_cancelled') {
+            loadJobs();
+            loadStagedLeads(activeClient?.id);
+          }
+
+          const logItem = data.log || (data.message ? {
             timestamp: data.timestamp || new Date().toISOString(),
             level: data.level || 'INFO',
-            message: data.message || '',
+            message: data.message,
             lead: data.lead,
-          },
-        ]);
+          } : null);
 
-        if (data.lead || data.level === 'SUCCESS') {
-          loadStagedLeads(activeClient?.id);
+          if (logItem) {
+            setLogs((prev) => [
+              ...prev.slice(-150),
+              {
+                timestamp: logItem.timestamp || new Date().toISOString(),
+                level: logItem.level || 'INFO',
+                message: logItem.message || '',
+                lead: logItem.lead,
+              },
+            ]);
+
+            if (logItem.lead || logItem.level === 'SUCCESS') {
+              loadStagedLeads(activeClient?.id);
+            }
+          }
+        } catch (err) {
+          console.error('SSE parsing error:', err);
         }
-      } catch (err) {
-        console.error('SSE parsing error:', err);
-      }
+      };
+
+      eventSource.onerror = () => {
+        eventSource.close();
+        if (!isCleanedUp && attempts < maxAttempts) {
+          attempts++;
+          const delay = Math.min(attempts * 2500, 10000);
+          console.warn(`SSE stream disconnected. Reconnecting in ${delay}ms (attempt ${attempts}/${maxAttempts})...`);
+          reconnectTimer = setTimeout(connectSSE, delay);
+        }
+      };
     };
 
+    connectSSE();
+
     return () => {
-      eventSource.close();
+      isCleanedUp = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (currentEventSource) currentEventSource.close();
     };
   }, [activeClient?.id]);
 
@@ -111,11 +165,9 @@ export const ScraperConsoleView: React.FC<ScraperConsoleViewProps> = ({
 
   const loadStagedLeads = async (clientId?: string) => {
     try {
-      const url = clientId && clientId !== 'ALL' ? `/api/staged-leads?client_id=${clientId}` : '/api/staged-leads';
-      const res = await fetch(url);
-      if (res.ok) {
-        const json = await res.json();
-        setStagedLeads(json);
+      const res = await api.getStagedLeads(clientId);
+      if (res.success) {
+        setStagedLeads(res.stagedLeads);
       }
     } catch (err) {
       console.error('Failed to load staged leads:', err);
@@ -123,63 +175,83 @@ export const ScraperConsoleView: React.FC<ScraperConsoleViewProps> = ({
   };
 
   const loadLeads = async (clientId?: string) => {
-    setIsLoadingLeads(true);
     try {
-      const url = clientId && clientId !== 'ALL' ? `/api/leads?clientId=${clientId}` : '/api/leads';
-      const res = await fetch(url);
-      const json = await res.json();
-      if (Array.isArray(json)) {
-        setLeads(json);
-      } else if (json.success && Array.isArray(json.leads)) {
-        setLeads(json.leads);
+      const res = await api.getLeads({ clientId });
+      if (res.success) {
+        setLeads(res.leads);
       }
     } catch (err) {
       console.error('Failed to load leads:', err);
+    }
+  };
+
+  const loadJobs = async () => {
+    setIsLoadingJobs(true);
+    try {
+      const res = await api.getJobs();
+      if (res.success) {
+        setJobs(res.jobs);
+      }
+    } catch (err) {
+      console.error('Failed to load job queue:', err);
     } finally {
-      setIsLoadingLeads(false);
+      setIsLoadingJobs(false);
     }
   };
 
   const handleStartPythonScraper = async () => {
     setIsScraping(true);
     try {
-      const res = await fetch('/api/scrape/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          clientId: activeClient?.id || 'C001',
-          niche: nicheQuery,
-          minSubs,
-          limit: targetCount,
-        }),
+      const res = await api.enqueueScrapeJob({
+        clientId: activeClient?.id || 'C001',
+        niche: nicheQuery,
+        minSubs,
+        limit: targetCount,
       });
-      const json = await res.json();
-      if (!res.ok) {
-        alert(json.error || 'Failed to start scraper job');
-      } else {
+      if (res.success) {
+        loadJobs();
         loadStagedLeads(activeClient?.id);
+        setActiveTab('queue');
       }
     } catch (err: any) {
-      alert(`Error starting scraper: ${err.message}`);
+      alert(`Error enqueuing scraper job: ${err.message}`);
     } finally {
       setIsScraping(false);
+    }
+  };
+
+  const handleCancelJob = async (jobId: string) => {
+    try {
+      await api.cancelJob(jobId);
+      loadJobs();
+    } catch (err: any) {
+      alert(`Failed to cancel job: ${err.message}`);
+    }
+  };
+
+  const handleViewJobLogs = async (job: ScrapeJob) => {
+    setSelectedJobIdForLogs(job.id);
+    setActiveTab('console');
+    try {
+      const res = await api.getJobDetails(job.id);
+      if (res.success && res.logs.length > 0) {
+        setLogs(res.logs.map((l) => ({
+          timestamp: l.timestamp,
+          level: l.level as any,
+          message: l.message,
+          lead: l.metadata,
+        })));
+      }
+    } catch (err) {
+      console.error('Failed to load specific job logs:', err);
     }
   };
 
   const handleStartGoogleSearchGrounding = async () => {
     setIsDiscoveringGrounded(true);
     try {
-      const res = await fetch('/api/gemini/discover-shows', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          niche: nicheQuery,
-          clientId: activeClient?.id || 'C001',
-          minSubs,
-        }),
-      });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error || 'Search grounding discovery failed');
+      const res = await api.discoverShows(nicheQuery, activeClient?.id || 'C001', minSubs);
+      if (!res.success) throw new Error(res.error || 'Search grounding discovery failed');
       loadStagedLeads(activeClient?.id);
       setActiveTab('staging');
     } catch (err: any) {
@@ -194,6 +266,9 @@ export const ScraperConsoleView: React.FC<ScraperConsoleViewProps> = ({
       prev.includes(p) ? prev.filter((item) => item !== p) : [...prev, p]
     );
   };
+
+  const activeRunningJobs = jobs.filter((j) => j.status === 'running');
+  const activePendingJobs = jobs.filter((j) => j.status === 'pending');
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
@@ -254,7 +329,7 @@ export const ScraperConsoleView: React.FC<ScraperConsoleViewProps> = ({
       )}
 
       {/* Navigation Tab Bar */}
-      <div className="flex items-center space-x-2 border-b border-slate-800 pb-3">
+      <div className="flex items-center space-x-2 border-b border-slate-800 pb-3 flex-wrap gap-y-2">
         <button
           onClick={() => setActiveTab('console')}
           className={`flex items-center space-x-2 px-4 py-2.5 rounded-xl text-xs font-bold transition-all ${
@@ -265,6 +340,23 @@ export const ScraperConsoleView: React.FC<ScraperConsoleViewProps> = ({
         >
           <Terminal className="w-4 h-4" />
           <span>Sourcing & Scraper Console</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('queue')}
+          className={`flex items-center space-x-2 px-4 py-2.5 rounded-xl text-xs font-bold transition-all relative ${
+            activeTab === 'queue'
+              ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/20'
+              : 'bg-slate-900 text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+          }`}
+        >
+          <Activity className="w-4 h-4" />
+          <span>Job Queue & Concurrency Pool</span>
+          {(activeRunningJobs.length > 0 || activePendingJobs.length > 0) && (
+            <span className="ml-1.5 px-2 py-0.5 rounded-full text-[10px] bg-indigo-500 text-white font-bold animate-pulse">
+              {activeRunningJobs.length + activePendingJobs.length} active
+            </span>
+          )}
         </button>
 
         <button
@@ -300,7 +392,179 @@ export const ScraperConsoleView: React.FC<ScraperConsoleViewProps> = ({
         </button>
       </div>
 
-      {/* Tab Content */}
+      {/* Tab: JOB QUEUE & CONCURRENCY MONITOR */}
+      {activeTab === 'queue' && (
+        <div className="space-y-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <Layers className="w-4 h-4 text-indigo-400" />
+                Scraper Background Job Queue (Max 2 Concurrent Workers)
+              </h3>
+              <p className="text-xs text-slate-400">
+                Independent background workers execute multi-source searches without blocking the UI or crashing on concurrency.
+              </p>
+            </div>
+            <button
+              onClick={loadJobs}
+              className="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors flex items-center gap-1.5 text-xs font-semibold"
+            >
+              <RotateCw className="w-3.5 h-3.5" />
+              <span>Refresh Queue</span>
+            </button>
+          </div>
+
+          {/* Active Workers Section */}
+          <div className="space-y-3">
+            <span className="text-xs font-bold text-slate-400 uppercase tracking-wider block">
+              Active Workers & Queued Tasks ({jobs.filter((j) => j.status === 'running' || j.status === 'pending').length})
+            </span>
+
+            {jobs.filter((j) => j.status === 'running' || j.status === 'pending').length === 0 ? (
+              <div className="p-8 text-center bg-slate-900/40 border border-slate-800 rounded-2xl text-slate-500 text-xs">
+                No active scraping jobs running. Start a job from the Sourcing Console to test worker orchestration.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {jobs
+                  .filter((j) => j.status === 'running' || j.status === 'pending')
+                  .map((job) => (
+                    <div
+                      key={job.id}
+                      className="p-4 bg-slate-900 border border-slate-800 rounded-xl space-y-3 shadow-lg"
+                    >
+                      <div className="flex items-start justify-between">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-mono font-bold text-indigo-300">[{job.clientId}]</span>
+                            <span className="text-sm font-semibold text-white">{job.niche}</span>
+                          </div>
+                          <p className="text-[11px] font-mono text-slate-500 mt-0.5">ID: {job.id}</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                              job.status === 'running'
+                                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30 animate-pulse'
+                                : 'bg-sky-500/20 text-sky-300 border border-sky-500/30'
+                            }`}
+                          >
+                            {job.status}
+                          </span>
+                          <button
+                            onClick={() => handleCancelJob(job.id)}
+                            className="p-1 text-slate-400 hover:text-rose-400 hover:bg-slate-800 rounded transition-colors"
+                            title="Cancel Job"
+                          >
+                            <Ban className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Progress Bar */}
+                      <div className="space-y-1">
+                        <div className="flex justify-between text-[11px] font-mono text-slate-400">
+                          <span>Progress</span>
+                          <span>{job.progress}%</span>
+                        </div>
+                        <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-indigo-500 transition-all duration-300"
+                            style={{ width: `${job.progress}%` }}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between text-xs text-slate-400 pt-1 border-t border-slate-800/60">
+                        <span>Found: <strong className="text-white">{job.foundCount}</strong> leads</span>
+                        <button
+                          onClick={() => handleViewJobLogs(job)}
+                          className="text-indigo-400 hover:text-indigo-300 font-medium flex items-center gap-1 text-[11px]"
+                        >
+                          <Terminal className="w-3 h-3" />
+                          <span>View Live Logs</span>
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            )}
+          </div>
+
+          {/* Historical Jobs Table */}
+          <div className="space-y-3">
+            <span className="text-xs font-bold text-slate-400 uppercase tracking-wider block">
+              Historical Jobs
+            </span>
+
+            <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-xl">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-950/80 text-slate-400 uppercase tracking-wider border-b border-slate-800">
+                  <tr>
+                    <th className="py-2.5 px-3">Job ID</th>
+                    <th className="py-2.5 px-3">Client & Niche</th>
+                    <th className="py-2.5 px-3">Status</th>
+                    <th className="py-2.5 px-3">Yield</th>
+                    <th className="py-2.5 px-3">Started</th>
+                    <th className="py-2.5 px-3 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {jobs.filter((j) => j.status !== 'running' && j.status !== 'pending').length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="py-4 text-center text-slate-500">
+                        No previous jobs recorded in this workspace.
+                      </td>
+                    </tr>
+                  ) : (
+                    jobs
+                      .filter((j) => j.status !== 'running' && j.status !== 'pending')
+                      .slice(0, 10)
+                      .map((job) => (
+                        <tr key={job.id} className="hover:bg-slate-800/30 transition-colors">
+                          <td className="py-2.5 px-3 font-mono text-[11px] text-slate-400">{job.id}</td>
+                          <td className="py-2.5 px-3">
+                            <span className="font-semibold text-white">{job.niche}</span>
+                            <span className="text-[11px] text-slate-500 ml-1">({job.clientId})</span>
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                                job.status === 'completed'
+                                  ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/20'
+                                  : job.status === 'cancelled'
+                                  ? 'bg-slate-800 text-slate-400'
+                                  : 'bg-rose-500/15 text-rose-400 border border-rose-500/20'
+                              }`}
+                            >
+                              {job.status}
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-3 font-mono text-slate-300">
+                            {job.foundCount} staged
+                          </td>
+                          <td className="py-2.5 px-3 text-slate-500 text-[11px]">
+                            {job.startedAt ? new Date(job.startedAt).toLocaleTimeString() : 'N/A'}
+                          </td>
+                          <td className="py-2.5 px-3 text-right">
+                            <button
+                              onClick={() => handleViewJobLogs(job)}
+                              className="text-indigo-400 hover:text-indigo-300 font-semibold"
+                            >
+                              Inspect Logs
+                            </button>
+                          </td>
+                        </tr>
+                      ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Tab Content: STAGING */}
       {activeTab === 'staging' && (
         <LeadStagingPanel
           stagedLeads={stagedLeads}
@@ -309,13 +573,14 @@ export const ScraperConsoleView: React.FC<ScraperConsoleViewProps> = ({
             loadStagedLeads(activeClient?.id);
             loadLeads(activeClient?.id);
           }}
-          onImportSuccess={(importedCount) => {
+          onImportSuccess={() => {
             loadLeads(activeClient?.id);
             loadStagedLeads(activeClient?.id);
           }}
         />
       )}
 
+      {/* Tab Content: BANK */}
       {activeTab === 'bank' && (
         <CentralLeadBankView
           clients={clients}
@@ -324,9 +589,9 @@ export const ScraperConsoleView: React.FC<ScraperConsoleViewProps> = ({
         />
       )}
 
+      {/* Tab Content: CONSOLE */}
       {activeTab === 'console' && (
         <div className="space-y-6">
-          {/* Control Panel Grid: Responsive 1 col on mobile/tablet, 2 col on lg */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
             {/* Parameters Column */}
             <div className="lg:col-span-5 bg-slate-900/60 border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-4 shadow-xl">
@@ -413,12 +678,12 @@ export const ScraperConsoleView: React.FC<ScraperConsoleViewProps> = ({
                   {isScraping ? (
                     <>
                       <span className="w-3.5 h-3.5 border-2 border-white/20 border-t-white rounded-full animate-spin" />
-                      <span>Executing Python Multi-Source Scraper...</span>
+                      <span>Queueing Scraper Job...</span>
                     </>
                   ) : (
                     <>
                       <Play className="w-4 h-4 fill-white" />
-                      <span>Run Python Lead Scraper to Staging</span>
+                      <span>Enqueue Python Lead Scraper</span>
                     </>
                   )}
                 </button>
@@ -448,13 +713,15 @@ export const ScraperConsoleView: React.FC<ScraperConsoleViewProps> = ({
               <div className="flex items-center justify-between px-3 sm:px-4 py-2.5 bg-slate-900/90 border-b border-slate-800 text-xs">
                 <div className="flex items-center gap-2 text-slate-300 font-mono">
                   <Terminal className="w-4 h-4 text-emerald-400 shrink-0" />
-                  <span className="truncate">Live Telemetry Terminal</span>
+                  <span className="truncate">
+                    {selectedJobIdForLogs ? `Telemetry: ${selectedJobIdForLogs}` : 'Live Telemetry Terminal'}
+                  </span>
                 </div>
                 <div className="flex items-center gap-2 text-[11px] font-mono text-slate-400 shrink-0">
                   <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
                   <span className="hidden sm:inline">SSE STREAM</span>
                   <button
-                    onClick={() => setLogs([])}
+                    onClick={() => { setLogs([]); setSelectedJobIdForLogs(null); }}
                     className="hover:text-white transition-colors cursor-pointer ml-1 p-1"
                     title="Clear terminal"
                   >
@@ -477,6 +744,7 @@ export const ScraperConsoleView: React.FC<ScraperConsoleViewProps> = ({
                     let badgeColor = 'text-slate-400';
                     if (log.level === 'WARN') badgeColor = 'text-amber-400';
                     if (log.level === 'SUCCESS') badgeColor = 'text-emerald-400 font-bold';
+                    if (log.level === 'ERROR') badgeColor = 'text-rose-400 font-bold';
                     return (
                       <div key={idx} className="leading-relaxed flex items-start gap-1.5 sm:gap-2">
                         <span className="text-[10px] text-slate-600 shrink-0 select-none hidden sm:inline">
