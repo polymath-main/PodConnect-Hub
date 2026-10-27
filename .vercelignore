@@ -1,0 +1,13 @@
+.git
+.github
+.aistudio
+.cursorrules
+.agents
+__pycache__
+scratch
+*.pyc
+*.log
+node_modules
+dist
+podconnect_leads.db-shm
+podconnect_leads.db-wal

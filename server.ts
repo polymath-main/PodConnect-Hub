@@ -30,6 +30,16 @@ const ai = new GoogleGenAI({
 });
 
 // Health check (public)
+app.get('/api', (_req: Request, res: Response) => {
+  res.json({
+    status: 'ok',
+    service: 'PodConnect Hub AI SaaS Platform',
+    version: '2.0.0',
+    platform: process.env.VERCEL ? 'vercel-serverless' : 'standalone-node',
+    timestamp: new Date().toISOString(),
+  });
+});
+
 app.get('/api/health', (_req: Request, res: Response) => {
   res.json({
     status: 'ok',
@@ -1001,7 +1011,13 @@ async function startServer() {
   process.on('SIGINT', () => handleShutdown('SIGINT'));
 }
 
-startServer().catch((err) => {
-  console.error('Failed to start server:', err);
-  process.exit(1);
-});
+export { app, startServer };
+export default app;
+
+const isVercel = Boolean(process.env.VERCEL || process.env.NOW_REGION || process.env.VERCEL_ENV);
+if (!isVercel) {
+  startServer().catch((err) => {
+    console.error('Failed to start server:', err);
+    process.exit(1);
+  });
+}

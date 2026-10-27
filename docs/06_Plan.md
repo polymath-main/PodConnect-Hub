@@ -146,6 +146,19 @@
 
 ---
 
+## Phase 9: Vercel Cloud Hosting & Serverless Architecture ✅ COMPLETE
+
+- [x] 2026-10-27T14:45:00+06:00 — Configure `vercel.json` with SPA routing rewrites and `/api/(.*)` serverless bridge
+- [x] 2026-10-27T14:45:15+06:00 — Create `api/index.ts` serverless handler wrapping Express application with path normalization
+- [x] 2026-10-27T14:45:30+06:00 — Update `server.ts` with named/default exports, `/api` root healthcheck, and serverless listening guard
+- [x] 2026-10-27T14:45:45+06:00 — Adapt `src/server/db.ts` for serverless ephemeral filesystems via `os.tmpdir()` and seed database copying
+- [x] 2026-10-27T14:46:00+06:00 — Enhance `src/server/queue.ts` worker process error trapping (`py.on('error')`) preventing uncaught exceptions
+- [x] 2026-10-27T14:46:15+06:00 — Add `VITE_API_URL` prefix support in `src/lib/api.ts` for decoupled client/server Vercel deployments
+- [x] 2026-10-27T14:46:30+06:00 — Update `package.json` with `engines.node >= 22.5.0` for Vercel Node 22 native SQLite support
+- [x] 2026-10-27T14:46:45+06:00 — Configure `.vercelignore` to exclude local caches, databases, and scratch suites
+
+---
+
 ## Verification Commands
 
 ```bash

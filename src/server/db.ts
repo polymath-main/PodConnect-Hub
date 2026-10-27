@@ -1,5 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import path from 'path';
+import fs from 'fs';
+import os from 'os';
 import { fileURLToPath } from 'url';
 import {
   Tenant,
@@ -15,18 +17,53 @@ import {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const DB_PATH = path.resolve(__dirname, '../../podconnect_leads.db');
+
+function resolveDatabasePath(): string {
+  if (process.env.DB_PATH) {
+    return process.env.DB_PATH;
+  }
+  const defaultRepoDb = path.resolve(__dirname, '../../podconnect_leads.db');
+
+  // Serverless runtime detection (Vercel, AWS Lambda) where filesystem is read-only except tmp directory
+  if (process.env.VERCEL || process.env.NOW_REGION || process.env.AWS_LAMBDA_FUNCTION_NAME) {
+    const tmpDir = process.env.TMPDIR || os.tmpdir() || '/tmp';
+    const tmpDbPath = path.join(tmpDir, 'podconnect_leads.db');
+    if (!fs.existsSync(tmpDbPath) && fs.existsSync(defaultRepoDb)) {
+      try {
+        fs.copyFileSync(defaultRepoDb, tmpDbPath);
+        return tmpDbPath;
+      } catch (err) {
+        console.warn('[DB] Failed to seed tmp podconnect_leads.db from repo:', err);
+      }
+    } else if (fs.existsSync(tmpDbPath)) {
+      return tmpDbPath;
+    }
+  }
+
+  return defaultRepoDb;
+}
+
+const DB_PATH = resolveDatabasePath();
 
 export class DatabaseService {
   private db: DatabaseSync;
 
   constructor(dbPath: string = DB_PATH) {
-    this.db = new DatabaseSync(dbPath);
+    try {
+      this.db = new DatabaseSync(dbPath);
+    } catch (err) {
+      console.warn(`[DB] Failed to open SQLite at ${dbPath}, falling back to :memory:`, err);
+      this.db = new DatabaseSync(':memory:');
+    }
     this.init();
   }
 
   private init() {
-    this.db.exec('PRAGMA journal_mode = WAL;');
+    try {
+      this.db.exec('PRAGMA journal_mode = WAL;');
+    } catch (err) {
+      console.warn('[DB] PRAGMA journal_mode = WAL notice:', err);
+    }
 
     // 1. Tenants table
     this.db.exec(`

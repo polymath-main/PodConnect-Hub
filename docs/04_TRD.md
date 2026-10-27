@@ -272,3 +272,18 @@ All routes under `/api/*` (except `/api/health`) require `Authorization: Bearer 
 | Node.js ESM | Server runs via `tsx server.ts`; do not use `node server.ts` |
 | SQLite | Use `node:sqlite` built-in (Node 24+); do not use `better-sqlite3` |
 | File searches | Use `fd` / `rg` with explicit path scope; no unbounded `find /` |
+
+---
+
+## 8. Vercel Cloud Deployment Architecture
+
+The application supports zero-config deployment on Vercel:
+
+| Component | Vercel Implementation |
+|-----------|------------------------|
+| Frontend SPA | Bundled via `vite build` into `dist/`, served globally via Vercel Edge CDN |
+| Client Routing | `vercel.json` rewrites `/((?!api/).*)` to `/index.html` preventing 404s |
+| API Layer | Serverless function at `api/index.ts` routing `/api/(.*)` to Express |
+| SQLite Database | Ephemeral seed staging to `os.tmpdir()` (`/tmp/podconnect_leads.db`) with fallback |
+| External Backend Proxy | Optional `VITE_API_URL` environment variable for standalone container backends |
+| Node.js Runtime | `engines.node >= 22.5.0` enforcing Node 22+ with native `node:sqlite` |

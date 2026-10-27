@@ -42,7 +42,12 @@ class ApiClient {
       ...((options.headers as Record<string, string>) || {}),
     };
 
-    const res = await fetch(endpoint, {
+    const baseUrl = (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '');
+    const url = endpoint.startsWith('http')
+      ? endpoint
+      : `${baseUrl}${endpoint.startsWith('/') ? '' : '/'}${endpoint}`;
+
+    const res = await fetch(url, {
       ...options,
       headers,
     });

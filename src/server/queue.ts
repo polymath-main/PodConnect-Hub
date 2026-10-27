@@ -255,6 +255,33 @@ export class JobQueueManager {
       }
     });
 
+    py.on('error', (err) => {
+      this.activeWorkers.delete(job.id);
+      job.status = 'failed';
+      job.completedAt = new Date().toISOString();
+      job.errorMessage = `Worker process failed: ${err.message}`;
+
+      dbService.updateJob(job.id, {
+        status: job.status,
+        completedAt: job.completedAt,
+        errorMessage: job.errorMessage,
+      });
+
+      dbService.appendJobLog(
+        job.id,
+        'ERROR',
+        `Worker process spawn error: ${err.message}`
+      );
+
+      this.broadcast(job, {
+        type: 'job_completed',
+        jobId: job.id,
+        job,
+      });
+
+      this.processNext();
+    });
+
     py.on('close', (code) => {
       this.activeWorkers.delete(job.id);
 
