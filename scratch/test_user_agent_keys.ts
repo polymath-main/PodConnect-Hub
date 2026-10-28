@@ -12,9 +12,10 @@ import http from 'http';
 import app from '../server.js';
 
 let server: http.Server | null = null;
-let baseUrl: string = '';
+let baseUrl: string = (process.argv[2] || '').replace(/\/+$/, '');
 
 async function startServer(): Promise<void> {
+  if (baseUrl) return;
   return new Promise((resolve) => {
     server = app.listen(0, () => {
       const addr = server!.address() as any;
