@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import {
   Tenant,
@@ -221,6 +222,27 @@ export class DatabaseService {
     `);
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);');
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);');
+
+    // 9. Agent API Keys table (Multi-Tenant User Agent Key & MCP Gateway)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_api_keys (
+        id TEXT PRIMARY KEY,
+        raw_key TEXT NOT NULL UNIQUE,
+        key_prefix TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        email TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        name TEXT NOT NULL DEFAULT 'Personal Agent Key',
+        role TEXT NOT NULL DEFAULT 'owner',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_used_at TIMESTAMP,
+        revoked_at TIMESTAMP,
+        FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+      );
+    `);
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_agent_keys_user ON agent_api_keys(user_id);');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_agent_keys_tenant ON agent_api_keys(tenant_id);');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_agent_keys_raw ON agent_api_keys(raw_key);');
 
     // Migrations: Add tenant_id to staged_leads and leads if not present
     this.runMigrations();
@@ -1223,6 +1245,108 @@ export class DatabaseService {
       createdAt: row.created_at,
       expiresAt: row.expires_at,
       revokedAt: row.revoked_at || null,
+    };
+  }
+
+  // ==========================================
+  // USER AGENT API KEYS MANAGEMENT
+  // ==========================================
+
+  public getOrCreateAgentKeyForUser(
+    userId: string,
+    email: string,
+    tenantId: string
+  ): { id: string; key: string; keyPrefix: string; name: string; createdAt: string; isNew: boolean } {
+    const existing = this.db.prepare(`
+      SELECT * FROM agent_api_keys 
+      WHERE user_id = ? AND tenant_id = ? AND revoked_at IS NULL 
+      ORDER BY created_at DESC LIMIT 1
+    `).get(userId, tenantId) as any;
+
+    if (existing) {
+      return {
+        id: existing.id,
+        key: existing.raw_key,
+        keyPrefix: existing.key_prefix,
+        name: existing.name,
+        createdAt: existing.created_at,
+        isNew: false,
+      };
+    }
+
+    const id = `key_${crypto.randomUUID().replace(/-/g, '')}`;
+    const rawKey = `pca_live_${crypto.randomBytes(24).toString('hex')}`;
+    const keyPrefix = `${rawKey.substring(0, 13)}...${rawKey.substring(rawKey.length - 4)}`;
+
+    this.db.prepare(`
+      INSERT INTO agent_api_keys (id, raw_key, key_prefix, user_id, email, tenant_id, name, role)
+      VALUES (?, ?, ?, ?, ?, ?, 'Personal Agent Key', 'owner')
+    `).run(id, rawKey, keyPrefix, userId, email, tenantId);
+
+    return {
+      id,
+      key: rawKey,
+      keyPrefix,
+      name: 'Personal Agent Key',
+      createdAt: new Date().toISOString(),
+      isNew: true,
+    };
+  }
+
+  public validateUserAgentKey(rawKey: string): {
+    valid: boolean;
+    userId: string;
+    email: string;
+    tenantId: string;
+    role: UserRole;
+  } | null {
+    if (!rawKey || !rawKey.startsWith('pca_live_')) return null;
+
+    const row = this.db.prepare(`
+      SELECT * FROM agent_api_keys 
+      WHERE raw_key = ? AND revoked_at IS NULL
+    `).get(rawKey) as any;
+
+    if (!row) return null;
+
+    this.db.prepare(`
+      UPDATE agent_api_keys SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?
+    `).run(row.id);
+
+    return {
+      valid: true,
+      userId: row.user_id,
+      email: row.email,
+      tenantId: row.tenant_id,
+      role: (row.role as UserRole) || 'owner',
+    };
+  }
+
+  public rotateAgentKey(
+    userId: string,
+    email: string,
+    tenantId: string
+  ): { id: string; key: string; keyPrefix: string; name: string; createdAt: string } {
+    this.db.prepare(`
+      UPDATE agent_api_keys SET revoked_at = CURRENT_TIMESTAMP 
+      WHERE user_id = ? AND tenant_id = ? AND revoked_at IS NULL
+    `).run(userId, tenantId);
+
+    const id = `key_${crypto.randomUUID().replace(/-/g, '')}`;
+    const rawKey = `pca_live_${crypto.randomBytes(24).toString('hex')}`;
+    const keyPrefix = `${rawKey.substring(0, 13)}...${rawKey.substring(rawKey.length - 4)}`;
+
+    this.db.prepare(`
+      INSERT INTO agent_api_keys (id, raw_key, key_prefix, user_id, email, tenant_id, name, role)
+      VALUES (?, ?, ?, ?, ?, ?, 'Rotated Agent Key', 'owner')
+    `).run(id, rawKey, keyPrefix, userId, email, tenantId);
+
+    return {
+      id,
+      key: rawKey,
+      keyPrefix,
+      name: 'Rotated Agent Key',
+      createdAt: new Date().toISOString(),
     };
   }
 }

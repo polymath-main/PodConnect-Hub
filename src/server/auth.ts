@@ -15,16 +15,39 @@ export interface AuthenticatedRequest extends Request {
 }
 
 /**
- * Validates agent secret key
+ * Validates agent secret key (Master key or User-Scoped pca_live_ key)
  */
-export function validateAgentKey(key?: string): { valid: boolean; agentId: string; role: UserRole } {
+export function validateAgentKey(key?: string, customAgentId?: string): {
+  valid: boolean;
+  agentId: string;
+  role: UserRole;
+  tenantId?: string;
+  email?: string;
+} {
   if (!key) return { valid: false, agentId: '', role: 'viewer' };
   const expectedKey = process.env.AGENT_SECRET_KEY || 'agent_secret_default_podconnect';
   const isDev = process.env.NODE_ENV !== 'production';
 
+  // 1. Check server master key
   if (key === expectedKey || (isDev && key === 'agent_test_key_podconnect')) {
-    return { valid: true, agentId: 'agent_default', role: 'owner' };
+    const sanitizedId = customAgentId && /^[a-zA-Z0-9_-]{3,64}$/.test(customAgentId) ? customAgentId : 'agent_default';
+    return { valid: true, agentId: sanitizedId, role: 'owner' };
   }
+
+  // 2. Check user-scoped agent key in database
+  if (key.startsWith('pca_live_')) {
+    const userKey = dbService.validateUserAgentKey(key);
+    if (userKey && userKey.valid) {
+      return {
+        valid: true,
+        agentId: userKey.userId,
+        email: userKey.email,
+        tenantId: userKey.tenantId,
+        role: userKey.role,
+      };
+    }
+  }
+
   return { valid: false, agentId: '', role: 'viewer' };
 }
 
@@ -82,10 +105,10 @@ export function authMiddleware(req: AuthenticatedRequest, res: Response, next: N
     // Check direct agent key
     const agentCheck = validateAgentKey(token);
     if (agentCheck.valid) {
-      const tenantId = (req.headers['x-tenant-id'] as string) || 'tenant_default';
+      const tenantId = agentCheck.tenantId || (req.headers['x-tenant-id'] as string) || 'tenant_default';
       req.user = {
         uid: agentCheck.agentId,
-        email: `${agentCheck.agentId}@podconnect.agent`,
+        email: agentCheck.email || `${agentCheck.agentId}@podconnect.agent`,
         isAgent: true,
       };
       req.tenantId = tenantId;

@@ -312,6 +312,34 @@ export interface LoginSessionResponse {
     plan: 'starter' | 'growth' | 'agency' | 'enterprise';
   };
   availableTenants: Tenant[];
+  agentKey?: {
+    key: string;
+    keyPrefix: string;
+    name: string;
+  };
+}
+
+export interface AgentAuthRequest {
+  agentKey: string;
+  agentId?: string;
+  tenantId?: string;
+}
+
+export interface AgentAuthResponse {
+  success: boolean;
+  authenticated: boolean;
+  agentId: string;
+  role: UserRole;
+  tenantId: string;
+  sessionToken: string;
+  expiresAt: string;
+  mcp: {
+    endpoint: string;
+    protocolVersion: string;
+    transport?: string;
+    toolsCount: number;
+    tools?: Array<{ name: string; description: string }>;
+  };
 }
 
 // --- Lightweight MCP Protocol Contracts ---

@@ -1,5 +1,5 @@
 import React from 'react';
-import { LogOut, User as UserIcon, Menu, X, Plus, Building2, ChevronDown } from 'lucide-react';
+import { LogOut, User as UserIcon, Menu, X, Plus, Building2, ChevronDown, Cpu } from 'lucide-react';
 import { WorkspaceAuthUser, Tenant } from '../types';
 
 interface HeaderProps {
@@ -15,6 +15,7 @@ interface HeaderProps {
   onToggleMobileMenu: () => void;
   activeTenant?: Tenant | null;
   onOpenWorkspaceSwitcher?: () => void;
+  onOpenAgentMcp?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -30,6 +31,7 @@ export const Header: React.FC<HeaderProps> = ({
   onToggleMobileMenu,
   activeTenant,
   onOpenWorkspaceSwitcher,
+  onOpenAgentMcp,
 }) => {
   return (
     <header className="sticky top-0 z-40 w-full flex items-center justify-between gap-4 md:gap-8 px-4 sm:px-6 py-3 bg-slate-950/85 backdrop-blur-md border-b border-slate-800 min-h-[56px]">
@@ -65,6 +67,19 @@ export const Header: React.FC<HeaderProps> = ({
               </span>
             )}
             <ChevronDown className="w-3 h-3 text-slate-400" />
+          </button>
+        )}
+
+        {/* Agent MCP Gateway Trigger */}
+        {user && onOpenAgentMcp && (
+          <button
+            onClick={onOpenAgentMcp}
+            className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 transition-colors cursor-pointer"
+            title="Configure Autonomous Agent MCP Access"
+          >
+            <Cpu className="w-3.5 h-3.5 text-indigo-400" />
+            <span className="hidden md:inline">Agent MCP</span>
+            <span className="md:hidden">MCP</span>
           </button>
         )}
       </div>

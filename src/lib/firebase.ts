@@ -20,11 +20,27 @@ import {
 import firebaseConfig from '../../firebase-applet-config.json';
 import { Client, Lead, Milestone } from '../types';
 
+// Resolve configuration from Vite environment variables (Vercel) with fallback to local JSON config
+const resolvedConfig = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || firebaseConfig.apiKey,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || firebaseConfig.authDomain,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || firebaseConfig.projectId,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || firebaseConfig.storageBucket,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || firebaseConfig.messagingSenderId,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || firebaseConfig.appId,
+};
+
 // Reuse existing Firebase app or initialize
-const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
+const app = getApps().length === 0 ? initializeApp(resolvedConfig) : getApp();
 export const auth = getAuth(app);
-const firestoreDbId = (firebaseConfig as Record<string, any>).firestoreDatabaseId || 'ai-studio-podconnecthubai-7d333a90-2680-4b44-b986-0aad5551056d';
-export const db = getFirestore(app, firestoreDbId);
+
+const customDbId = import.meta.env.VITE_FIREBASE_DATABASE_ID;
+const fallbackDbId = !import.meta.env.VITE_FIREBASE_PROJECT_ID ? (firebaseConfig as Record<string, any>).firestoreDatabaseId : undefined;
+const firestoreDbId = customDbId || fallbackDbId;
+
+export const db = firestoreDbId && firestoreDbId !== '(default)'
+  ? getFirestore(app, firestoreDbId)
+  : getFirestore(app);
 
 // Validate Connection to Firestore safely without throwing unhandled exceptions
 async function testConnection() {

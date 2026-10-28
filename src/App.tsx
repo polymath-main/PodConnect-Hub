@@ -10,6 +10,8 @@ import { CalendarMilestonesView } from './components/CalendarMilestonesView';
 import { WorkspaceHubView } from './components/WorkspaceHubView';
 import { ConfirmationModal } from './components/ConfirmationModal';
 import { WorkspaceSwitcherModal } from './components/tenants/WorkspaceSwitcherModal';
+import { AgentMcpModal } from './components/tenants/AgentMcpModal';
+import { LandingPageView } from './components/LandingPageView';
 import { Client, Lead, WorkspaceAuthUser, Tenant } from './types';
 import { initAuth, googleSignIn, operatorSignIn, logout, fetchClientsFromFirestore, saveClientToFirestore } from './lib/firebase';
 import { findOrCreateMasterSheet } from './lib/workspace';
@@ -24,6 +26,7 @@ export default function App() {
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [activeTenant, setActiveTenant] = useState<Tenant | null>(null);
   const [isWorkspaceModalOpen, setIsWorkspaceModalOpen] = useState<boolean>(false);
+  const [isAgentMcpModalOpen, setIsAgentMcpModalOpen] = useState<boolean>(false);
 
   // Client records loaded dynamically from database / Firestore (no hardcoded test data)
   const [clients, setClients] = useState<Client[]>([]);
@@ -264,6 +267,7 @@ export default function App() {
         onToggleMobileMenu={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
         activeTenant={activeTenant}
         onOpenWorkspaceSwitcher={() => setIsWorkspaceModalOpen(true)}
+        onOpenAgentMcp={() => setIsAgentMcpModalOpen(true)}
       />
 
       {authError && (
@@ -287,7 +291,16 @@ export default function App() {
         </div>
       )}
 
-      <div className="flex-1 flex overflow-hidden">
+      {!authUser ? (
+        <LandingPageView
+          onSignIn={handleSignIn}
+          onOperatorSignIn={handleOperatorSignIn}
+          isLoggingIn={isLoggingIn}
+          authError={authError}
+        />
+      ) : (
+        <>
+          <div className="flex-1 flex overflow-hidden">
         {/* Responsive Workspace Sidebar & Mobile Drawer */}
         <Sidebar
           currentView={currentView}
@@ -427,6 +440,8 @@ export default function App() {
           );
         })}
       </nav>
+    </>
+  )}
 
 
       {/* Mandatory User Confirmation Modal for Workspace Mutations */}
@@ -453,6 +468,13 @@ export default function App() {
         }}
         tenants={tenants}
         onTenantsUpdated={loadTenants}
+      />
+
+      {/* Autonomous Agent & MCP Access Modal */}
+      <AgentMcpModal
+        isOpen={isAgentMcpModalOpen}
+        onClose={() => setIsAgentMcpModalOpen(false)}
+        activeTenantId={activeTenant?.id}
       />
     </div>
   );

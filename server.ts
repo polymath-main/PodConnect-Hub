@@ -175,8 +175,9 @@ app.post('/api/auth/session', async (req: Request, res: Response) => {
 
     const activeTenant = dbService.getTenantById(targetTenantId);
     const availableTenants = dbService.getTenantsForUser(userId, userEmail);
+    const userAgentKey = dbService.getOrCreateAgentKeyForUser(userId, userEmail, targetTenantId);
 
-    const response: LoginSessionResponse = {
+    const response: LoginSessionResponse & { agentKey?: { key: string; keyPrefix: string; name: string } } = {
       success: true,
       sessionToken: session.id,
       expiresAt: session.expiresAt,
@@ -185,6 +186,11 @@ app.post('/api/auth/session', async (req: Request, res: Response) => {
         email: session.email,
         role: session.role,
         isAgent,
+      },
+      agentKey: {
+        key: userAgentKey.key,
+        keyPrefix: userAgentKey.keyPrefix,
+        name: userAgentKey.name,
       },
       activeTenant: activeTenant
         ? {
@@ -219,6 +225,163 @@ app.get('/api/mcp', (_req: Request, res: Response) => {
     toolsCount: MCP_TOOLS.length,
     tools: MCP_TOOLS.map((t) => ({ name: t.name, description: t.description })),
   });
+});
+
+// Dedicated Autonomous Agent Authentication Endpoint
+app.post('/api/auth/agent', async (req: Request, res: Response) => {
+  try {
+    const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
+    if (!checkSessionRateLimit(clientIp)) {
+      return res.status(429).json({ error: 'Too many authentication attempts. Please wait 1 minute.' });
+    }
+
+    // Extract key from Authorization header, x-agent-key, or request body
+    const authHeader = req.headers.authorization;
+    let rawKey = (req.headers['x-agent-key'] as string) || '';
+    if (!rawKey && authHeader && authHeader.startsWith('Bearer ')) {
+      rawKey = authHeader.substring(7).trim();
+    }
+    if (!rawKey && req.body) {
+      rawKey = req.body.agentKey || req.body.token || req.body.key || '';
+    }
+
+    const customAgentId = req.body?.agentId || (req.headers['x-agent-id'] as string) || undefined;
+    const requestedTenant = req.body?.tenantId || (req.headers['x-tenant-id'] as string) || 'tenant_default';
+
+    const check = validateAgentKey(rawKey, customAgentId);
+    if (!check.valid) {
+      return res.status(401).json({
+        success: false,
+        authenticated: false,
+        error: 'Invalid or missing agent secret key',
+        help: 'Set AGENT_SECRET_KEY in Vercel environment variables and pass it via "Authorization: Bearer <key>" or "x-agent-key: <key>".',
+      });
+    }
+
+    const agentId = check.agentId;
+    const agentEmail = check.email || `${agentId}@podconnect.agent`;
+    const role: UserRole = check.role;
+
+    // Ensure target tenant exists or fallback to default
+    const targetTenantId = check.tenantId || requestedTenant || 'tenant_default';
+    let activeTenant = dbService.getTenantById(targetTenantId);
+    if (!activeTenant) {
+      activeTenant = dbService.getTenantById('tenant_default');
+    }
+
+    // Ensure agent membership in target tenant
+    const existingRole = dbService.getUserRoleInTenant(targetTenantId, agentId, agentEmail);
+    if (!existingRole) {
+      dbService.addTenantMember(targetTenantId, agentEmail, role, agentId);
+    }
+
+    // Generate cryptographic session token (valid 30 days for agents)
+    const sessionToken = `pcs_${crypto.randomUUID().replace(/-/g, '')}`;
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+
+    const session = dbService.createSession({
+      id: sessionToken,
+      userId: agentId,
+      email: agentEmail,
+      tenantId: targetTenantId,
+      role,
+      authType: 'agent_key',
+      userAgent: (req.headers['user-agent'] as string) || 'PodConnect-Agent-Client/2.0',
+      ipAddress: clientIp,
+      expiresAt,
+    });
+
+    return res.status(200).json({
+      success: true,
+      authenticated: true,
+      agentId,
+      role,
+      tenantId: targetTenantId,
+      sessionToken: session.id,
+      expiresAt: session.expiresAt,
+      mcp: {
+        endpoint: '/api/mcp',
+        protocolVersion: '2024-11-05',
+        transport: 'HTTP JSON-RPC 2.0 (Streamable POST)',
+        toolsCount: MCP_TOOLS.length,
+        tools: MCP_TOOLS.map((t) => ({ name: t.name, description: t.description })),
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, authenticated: false, error: err.message || 'Agent authentication failed' });
+  }
+});
+
+// Live Healthcheck & Verification Ping for Autonomous Agents
+app.get('/api/auth/agent', (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    let rawToken = (req.headers['x-session-token'] as string) || (req.headers['x-agent-key'] as string) || '';
+    if (!rawToken && authHeader && authHeader.startsWith('Bearer ')) {
+      rawToken = authHeader.substring(7).trim();
+    }
+    if (!rawToken && req.query.key) {
+      rawToken = String(req.query.key).trim();
+    }
+
+    if (!rawToken) {
+      return res.status(401).json({
+        success: false,
+        authenticated: false,
+        error: 'Missing authentication credentials',
+        help: 'Provide your agent secret key via "Authorization: Bearer <key>" or "x-agent-key" header.',
+      });
+    }
+
+    // Check if token is an existing active session
+    const session = dbService.getSession(rawToken);
+    if (session && !session.revokedAt && new Date(session.expiresAt).getTime() > Date.now()) {
+      return res.status(200).json({
+        success: true,
+        authenticated: true,
+        status: 'active',
+        authMode: 'session_token',
+        agentId: session.userId,
+        tenantId: session.tenantId,
+        role: session.role,
+        expiresAt: session.expiresAt,
+        mcp: {
+          endpoint: '/api/mcp',
+          protocolVersion: '2024-11-05',
+          toolsCount: MCP_TOOLS.length,
+        },
+      });
+    }
+
+    // Validate as direct agent key
+    const check = validateAgentKey(rawToken);
+    if (check.valid) {
+      const tenantId = check.tenantId || (req.headers['x-tenant-id'] as string) || 'tenant_default';
+      return res.status(200).json({
+        success: true,
+        authenticated: true,
+        status: 'active',
+        authMode: rawToken.startsWith('pca_live_') ? 'user_agent_key' : 'agent_key',
+        agentId: check.agentId,
+        tenantId,
+        role: check.role,
+        mcp: {
+          endpoint: '/api/mcp',
+          protocolVersion: '2024-11-05',
+          toolsCount: MCP_TOOLS.length,
+        },
+      });
+    }
+
+    return res.status(401).json({
+      success: false,
+      authenticated: false,
+      error: 'Invalid agent credentials or expired session',
+      help: 'Check that AGENT_SECRET_KEY in Vercel configs matches the key provided.',
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, authenticated: false, error: err.message || 'Agent verification failed' });
+  }
 });
 
 // Apply Authentication & Multi-Tenant Middleware to all protected /api routes
@@ -268,6 +431,77 @@ app.delete('/api/auth/session', (req: AuthenticatedRequest, res: Response) => {
     res.json({ success: true, message: 'Session successfully revoked' });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to revoke session' });
+  }
+});
+
+// Retrieve or auto-provision personal Agent API Key for the active user & tenant
+app.get('/api/user/agent-key', (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const userId = req.user!.uid;
+    const userEmail = req.user!.email;
+    const tenantId = req.tenantId || 'tenant_default';
+
+    const keyInfo = dbService.getOrCreateAgentKeyForUser(userId, userEmail, tenantId);
+    const host = req.get('host') || 'localhost:3000';
+    const protocol = req.protocol === 'https' || req.get('x-forwarded-proto') === 'https' ? 'https' : 'http';
+    const baseUrl = `${protocol}://${host}`;
+
+    res.json({
+      success: true,
+      key: keyInfo.key,
+      keyPrefix: keyInfo.keyPrefix,
+      name: keyInfo.name,
+      createdAt: keyInfo.createdAt,
+      tenantId,
+      mcpConfig: {
+        serverName: 'podconnect-hub',
+        command: 'python3',
+        args: ['${workspaceFolder}/mcp/podconnect_mcp.py'],
+        env: {
+          PODCONNECT_URL: baseUrl,
+          AGENT_SECRET_KEY: keyInfo.key,
+          PODCONNECT_TENANT_ID: tenantId,
+        },
+      },
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to retrieve agent API key' });
+  }
+});
+
+// Rotate personal Agent API Key
+app.post('/api/user/agent-key/rotate', (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const userId = req.user!.uid;
+    const userEmail = req.user!.email;
+    const tenantId = req.tenantId || 'tenant_default';
+
+    const newKey = dbService.rotateAgentKey(userId, userEmail, tenantId);
+    const host = req.get('host') || 'localhost:3000';
+    const protocol = req.protocol === 'https' || req.get('x-forwarded-proto') === 'https' ? 'https' : 'http';
+    const baseUrl = `${protocol}://${host}`;
+
+    res.json({
+      success: true,
+      message: 'Agent API Key successfully rotated. Previous key has been revoked.',
+      key: newKey.key,
+      keyPrefix: newKey.keyPrefix,
+      name: newKey.name,
+      createdAt: newKey.createdAt,
+      tenantId,
+      mcpConfig: {
+        serverName: 'podconnect-hub',
+        command: 'python3',
+        args: ['${workspaceFolder}/mcp/podconnect_mcp.py'],
+        env: {
+          PODCONNECT_URL: baseUrl,
+          AGENT_SECRET_KEY: newKey.key,
+          PODCONNECT_TENANT_ID: tenantId,
+        },
+      },
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to rotate agent API key' });
   }
 });
 

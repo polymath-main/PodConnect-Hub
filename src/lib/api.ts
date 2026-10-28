@@ -11,6 +11,8 @@ import {
   PipelineStage,
   LoginSessionRequest,
   LoginSessionResponse,
+  AgentAuthRequest,
+  AgentAuthResponse,
   JsonRpcResponse,
 } from '../types';
 import { PlanLimits } from './plans';
@@ -335,6 +337,29 @@ class ApiClient {
     return res;
   }
 
+  public async loginAgent(payload: AgentAuthRequest): Promise<AgentAuthResponse> {
+    const res = await this.request<AgentAuthResponse>('/api/auth/agent', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    if (res.sessionToken) {
+      this.setSessionToken(res.sessionToken);
+      this.setUserContext(res.agentId, `${res.agentId}@podconnect.agent`);
+      if (res.tenantId) {
+        this.setTenantId(res.tenantId);
+      }
+    }
+    return res;
+  }
+
+  public async verifyAgent(keyOrToken?: string): Promise<{ success: boolean; authenticated: boolean; status?: string; agentId?: string; tenantId?: string }> {
+    const headers: Record<string, string> = {};
+    if (keyOrToken) {
+      headers['Authorization'] = `Bearer ${keyOrToken}`;
+    }
+    return this.request('/api/auth/agent', { method: 'GET', headers });
+  }
+
   public async getSession(): Promise<LoginSessionResponse> {
     return this.request<LoginSessionResponse>('/api/auth/session');
   }
@@ -347,6 +372,41 @@ class ApiClient {
     } finally {
       this.setSessionToken(null);
     }
+  }
+
+  public async getUserAgentKey(): Promise<{
+    success: boolean;
+    key: string;
+    keyPrefix: string;
+    name: string;
+    createdAt: string;
+    tenantId: string;
+    mcpConfig: {
+      serverName: string;
+      command: string;
+      args: string[];
+      env: Record<string, string>;
+    };
+  }> {
+    return this.request('/api/user/agent-key');
+  }
+
+  public async rotateUserAgentKey(): Promise<{
+    success: boolean;
+    message: string;
+    key: string;
+    keyPrefix: string;
+    name: string;
+    createdAt: string;
+    tenantId: string;
+    mcpConfig: {
+      serverName: string;
+      command: string;
+      args: string[];
+      env: Record<string, string>;
+    };
+  }> {
+    return this.request('/api/user/agent-key/rotate', { method: 'POST' });
   }
 
   public async callMcpTool(name: string, args: Record<string, any> = {}): Promise<any> {
