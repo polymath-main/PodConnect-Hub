@@ -13,6 +13,7 @@ import {
   BarChart3,
   TrendingUp,
   Sparkles,
+  Download,
 } from 'lucide-react';
 import {
   BarChart,
@@ -24,7 +25,7 @@ import {
   CartesianGrid,
 } from 'recharts';
 import { Client, Lead } from '../types';
-import { MASTER_SHEET_TITLE, findOrCreateMasterSheet, syncClientToMasterSheet } from '../lib/workspace';
+import { MASTER_SHEET_TITLE, findOrCreateMasterSheet, syncClientToMasterSheet, syncLeadsToMasterSheet } from '../lib/workspace';
 import { api } from '../lib/api';
 
 interface MasterDatabaseViewProps {
@@ -184,6 +185,70 @@ export const MasterDatabaseView: React.FC<MasterDatabaseViewProps> = ({
     });
   };
 
+  const exportLeadsToCSV = () => {
+    if (allLeads.length === 0) {
+      setSyncFeedback('No leads available in master database to export.');
+      return;
+    }
+    const headers = ['ID', 'Show Name', 'Host Name', 'Platform', 'Email', 'Email Type', 'Confidence', 'Subscribers', 'Niche', 'Tags', 'Client ID', 'Status', 'Location'];
+    const rows = allLeads.map((l) => [
+      l.id,
+      `"${l.showName?.replace(/"/g, '""') || ''}"`,
+      `"${l.hostName?.replace(/"/g, '""') || ''}"`,
+      l.platform,
+      l.email || '',
+      l.emailType || 'direct',
+      `${Math.round((l.emailConfidence ?? 1.0) * 100)}%`,
+      l.subscribers,
+      `"${l.niche || ''}"`,
+      `"${(l.tags || []).join(', ')}"`,
+      l.clientId || '',
+      l.status,
+      `"${l.location || ''}"`,
+    ]);
+
+    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map((e) => e.join(','))].join('\n');
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement('a');
+    link.setAttribute('href', encodedUri);
+    link.setAttribute('download', `podconnect_leads_master_${new Date().toISOString().slice(0, 10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setSyncFeedback(`Downloaded CSV for ${allLeads.length} master leads.`);
+  };
+
+  const handleSyncLeadsToGoogleSheets = () => {
+    if (!isAuthenticated) {
+      onSignIn();
+      return;
+    }
+
+    if (allLeads.length === 0) {
+      setSyncFeedback('No leads available to synchronize.');
+      return;
+    }
+
+    onRequestConfirmation({
+      title: 'Synchronize All Leads to Master Google Sheet',
+      description: `Append and update ${allLeads.length} leads in the "Podcast Leads" tab of "${MASTER_SHEET_TITLE}":`,
+      affectedItems: allLeads.slice(0, 5).map((l) => `[${l.id}] ${l.showName} (${l.platform}) — ${l.email || 'No email'}`).concat(allLeads.length > 5 ? [`... and ${allLeads.length - 5} more`] : []),
+      onConfirm: async () => {
+        setIsSyncing(true);
+        setSyncFeedback(null);
+        try {
+          const sheet = await findOrCreateMasterSheet();
+          const res = await syncLeadsToMasterSheet(sheet.spreadsheetId, allLeads);
+          setSyncFeedback(`Successfully synchronized ${res.count} lead(s) to Master Google Sheet ('Podcast Leads' tab)!`);
+        } catch (err: any) {
+          setSyncFeedback(`Lead sync failed: ${err.message}`);
+        } finally {
+          setIsSyncing(false);
+        }
+      },
+    });
+  };
+
   return (
     <div className="max-w-7xl mx-auto space-y-6">
       {/* Top Banner & Control Area */}
@@ -211,6 +276,26 @@ export const MasterDatabaseView: React.FC<MasterDatabaseViewProps> = ({
             </button>
           )}
 
+          <button
+            onClick={exportLeadsToCSV}
+            disabled={allLeads.length === 0}
+            className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-200 hover:text-white bg-slate-800 hover:bg-slate-700 border border-slate-700/80 rounded-lg transition-colors cursor-pointer min-h-[38px] disabled:opacity-50"
+            title="Download all leads to CSV"
+          >
+            <Download className="w-4 h-4 text-sky-400 shrink-0" />
+            <span>Export Leads CSV ({allLeads.length})</span>
+          </button>
+
+          <button
+            onClick={handleSyncLeadsToGoogleSheets}
+            disabled={isSyncing || allLeads.length === 0}
+            className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-emerald-300 hover:text-white bg-emerald-950/40 hover:bg-emerald-900/60 border border-emerald-800/80 rounded-lg transition-colors cursor-pointer min-h-[38px] disabled:opacity-50"
+            title="Sync all leads to 'Podcast Leads' sheet tab"
+          >
+            <FileSpreadsheet className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span>Sync Leads Tab</span>
+          </button>
+
           {masterSheetUrl && (
             <a
               href={masterSheetUrl}
@@ -219,7 +304,7 @@ export const MasterDatabaseView: React.FC<MasterDatabaseViewProps> = ({
               className="flex items-center gap-1.5 sm:gap-2 px-3 py-2 text-xs font-medium text-emerald-300 hover:text-white bg-emerald-950/40 hover:bg-emerald-900/60 border border-emerald-800/80 rounded-lg transition-colors cursor-pointer min-h-[38px]"
             >
               <FileSpreadsheet className="w-4 h-4 text-emerald-400 shrink-0" />
-              <span>Google Sheets</span>
+              <span>Open Sheet</span>
               <ExternalLink className="w-3 h-3 shrink-0" />
             </a>
           )}
@@ -230,7 +315,7 @@ export const MasterDatabaseView: React.FC<MasterDatabaseViewProps> = ({
             className="flex items-center gap-2 px-3.5 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded-lg transition-colors cursor-pointer min-h-[38px]"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
-            <span>{isSyncing ? 'Syncing...' : 'Sync to Sheets'}</span>
+            <span>{isSyncing ? 'Syncing...' : 'Sync Clients'}</span>
           </button>
         </div>
       </div>

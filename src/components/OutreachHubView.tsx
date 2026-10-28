@@ -23,7 +23,7 @@ import {
   DoorOpen,
   Copy,
 } from 'lucide-react';
-import { Client, Lead, PitchDraft, OutreachSequence, SequenceTouchpoint, PipelineStage } from '../types';
+import { Client, Lead, PitchDraft, OutreachSequence, SequenceTouchpoint, SequenceStep, PipelineStage } from '../types';
 import { sendGmailPitch, createGmailDraft, createOutreachStrategyDoc } from '../lib/workspace';
 import { getAccessToken } from '../lib/firebase';
 import { api } from '../lib/api';
@@ -76,7 +76,7 @@ export const OutreachHubView: React.FC<OutreachHubViewProps> = ({
   // Single Pitch & Multi-Touch Sequence Studio State
   const [currentLeadForPitch, setCurrentLeadForPitch] = useState<Lead | null>(activePitchLead);
   const [currentSequence, setCurrentSequence] = useState<OutreachSequence | null>(null);
-  const [activeTouchpoint, setActiveTouchpoint] = useState<SequenceTouchpoint>('initial');
+  const [activeTouchpoint, setActiveTouchpoint] = useState<SequenceStep>('initial');
   const [isGeneratingSequence, setIsGeneratingSequence] = useState(false);
   const [pipelineFilter, setPipelineFilter] = useState<string>('ALL');
 

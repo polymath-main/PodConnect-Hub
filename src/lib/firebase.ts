@@ -20,8 +20,8 @@ import {
 import firebaseConfig from '../../firebase-applet-config.json';
 import { Client, Lead, Milestone } from '../types';
 
-// Resolve configuration from Vite environment variables (Vercel) with fallback to local JSON config
 const resolvedConfig = {
+  ...firebaseConfig,
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY || firebaseConfig.apiKey,
   authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || firebaseConfig.authDomain,
   projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || firebaseConfig.projectId,
@@ -33,21 +33,20 @@ const resolvedConfig = {
 // Reuse existing Firebase app or initialize
 const app = getApps().length === 0 ? initializeApp(resolvedConfig) : getApp();
 export const auth = getAuth(app);
+const firestoreDbId =
+  import.meta.env.VITE_FIREBASE_DATABASE_ID ||
+  (firebaseConfig as Record<string, any>).firestoreDatabaseId ||
+  'ai-studio-podconnecthubai-7d333a90-2680-4b44-b986-0aad5551056d';
+export const db = getFirestore(app, firestoreDbId);
 
-const customDbId = import.meta.env.VITE_FIREBASE_DATABASE_ID;
-const fallbackDbId = !import.meta.env.VITE_FIREBASE_PROJECT_ID ? (firebaseConfig as Record<string, any>).firestoreDatabaseId : undefined;
-const firestoreDbId = customDbId || fallbackDbId;
-
-export const db = firestoreDbId && firestoreDbId !== '(default)'
-  ? getFirestore(app, firestoreDbId)
-  : getFirestore(app);
-
-// Validate Connection to Firestore safely without throwing unhandled exceptions
+// Validate Connection to Firestore per skill requirements
 async function testConnection() {
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
-  } catch {
-    // Gracefully ignore initial or offline check notices
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('the client is offline')) {
+      console.error('Please check your Firebase configuration.');
+    }
   }
 }
 testConnection();
@@ -100,31 +99,37 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
   throw new Error(JSON.stringify(errInfo));
 }
 
-// Configure Google Auth Provider with standard profile and email scopes
+// Configure Google Auth Provider with all requested Google Workspace scopes
 const provider = new GoogleAuthProvider();
-provider.setCustomParameters({ prompt: 'select_account' });
-provider.addScope('email');
-provider.addScope('profile');
-provider.addScope('openid');
+provider.addScope('https://www.googleapis.com/auth/drive');
+provider.addScope('https://www.googleapis.com/auth/drive.file');
+provider.addScope('https://www.googleapis.com/auth/drive.readonly');
+provider.addScope('https://www.googleapis.com/auth/spreadsheets');
+provider.addScope('https://www.googleapis.com/auth/spreadsheets.readonly');
+provider.addScope('https://www.googleapis.com/auth/documents');
+provider.addScope('https://www.googleapis.com/auth/documents.readonly');
+provider.addScope('https://www.googleapis.com/auth/calendar');
+provider.addScope('https://www.googleapis.com/auth/calendar.events');
+provider.addScope('https://www.googleapis.com/auth/calendar.readonly');
+provider.addScope('https://www.googleapis.com/auth/gmail.send');
+provider.addScope('https://www.googleapis.com/auth/gmail.compose');
 
 // In-memory token cache (NEVER stored in localStorage or sessionStorage)
 let cachedAccessToken: string | null = null;
 let isSigningIn = false;
 
-// Initialize auth state listener with automatic token restoration across page refreshes
+// Initialize auth state listener
 export const initAuth = (
   onAuthSuccess?: (user: User, token: string) => void,
   onAuthFailure?: () => void
 ) => {
   return onAuthStateChanged(auth, async (user: User | null) => {
     if (user) {
-      try {
-        const idToken = await user.getIdToken();
-        cachedAccessToken = cachedAccessToken || idToken;
+      if (cachedAccessToken) {
         if (onAuthSuccess) onAuthSuccess(user, cachedAccessToken);
-      } catch (err) {
-        console.warn('Failed to resolve Firebase ID token:', err);
-        if (onAuthSuccess) onAuthSuccess(user, cachedAccessToken || '');
+      } else if (!isSigningIn) {
+        cachedAccessToken = null;
+        if (onAuthFailure) onAuthFailure();
       }
     } else {
       cachedAccessToken = null;
@@ -139,11 +144,11 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
     isSigningIn = true;
     const result = await signInWithPopup(auth, provider);
     const credential = GoogleAuthProvider.credentialFromResult(result);
-    
-    // Use Google OAuth accessToken if returned, or fallback to standard Firebase ID token
-    const idToken = await result.user.getIdToken();
-    cachedAccessToken = credential?.accessToken || idToken;
+    if (!credential?.accessToken) {
+      throw new Error('Failed to obtain Google Workspace access token.');
+    }
 
+    cachedAccessToken = credential.accessToken;
     return { user: result.user, accessToken: cachedAccessToken };
   } catch (error: any) {
     // If the user cancelled or closed the popup window, handle it cleanly without error
@@ -155,33 +160,11 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
     ) {
       return null;
     }
-
-    // Friendly diagnostic for unauthorized domains
-    if (error?.code === 'auth/unauthorized-domain') {
-      const currentHost = typeof window !== 'undefined' ? window.location.hostname : 'current domain';
-      throw new Error(
-        `Domain "${currentHost}" is not authorized in Firebase Console. Add it in Firebase Console > Authentication > Settings > Authorized domains, or use Quick Operator access.`
-      );
-    }
-
     console.error('Sign in error:', error);
     throw error;
   } finally {
     isSigningIn = false;
   }
-};
-
-// Quick Operator / Demo Authentication Fallback
-export const operatorSignIn = async (
-  email: string = 'operator@podconnect.agency'
-): Promise<{ user: { uid: string; email: string; displayName: string; photoURL?: string }; accessToken: string }> => {
-  const mockUser = {
-    uid: 'operator_system',
-    email: email,
-    displayName: 'Lead Agency Operator',
-  };
-  cachedAccessToken = 'operator_system_token';
-  return { user: mockUser, accessToken: cachedAccessToken };
 };
 
 export const getAccessToken = async (): Promise<string | null> => {
@@ -190,6 +173,19 @@ export const getAccessToken = async (): Promise<string | null> => {
 
 export const setAccessTokenInMemory = (token: string | null) => {
   cachedAccessToken = token;
+};
+
+export const operatorSignIn = async (email: string = 'operator@podconnect.agency') => {
+  return {
+    user: {
+      uid: 'operator_system',
+      displayName: 'PodConnect Operations Lead',
+      email: email,
+      photoURL: null,
+      emailVerified: true,
+    },
+    accessToken: 'operator_local_access_token',
+  };
 };
 
 export const logout = async () => {

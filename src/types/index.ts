@@ -80,9 +80,6 @@ export type LeadStatus =
   | 'Contacted'
   | 'Sent'
   | 'Dispatched'
-  | 'Follow-Up 1 Sent'
-  | 'Follow-Up 2 Sent'
-  | 'Breakup Sent'
   | 'Replied'
   | 'Responded'
   | 'Converted'
@@ -90,49 +87,14 @@ export type LeadStatus =
   | 'Archived'
   | 'Passed';
 
-export type PipelineStage =
-  | 'drafted'
-  | 'initial_sent'
-  | 'fu1_due'
-  | 'fu1_sent'
-  | 'fu2_due'
-  | 'fu2_sent'
-  | 'breakup_due'
-  | 'breakup_sent'
-  | 'responded'
-  | 'booked'
-  | 'archived';
+export type EmailType = 'direct' | 'mailto' | 'inferred';
 
-export type SequenceTouchpoint = 'initial' | 'follow_up_1' | 'follow_up_2' | 'breakup';
-
-export interface SequenceStep {
-  subject: string;
-  body: string;
-  delayDays: number;
-  talkingPoints?: string[];
-}
-
-export interface OutreachSequence {
-  id?: number;
-  tenantId?: string;
-  leadId: number;
-  clientId: string;
-  initial: SequenceStep;
-  followUp1: SequenceStep;
-  followUp2: SequenceStep;
-  breakup: SequenceStep;
-  pipelineStage: PipelineStage;
-  initialSentAt?: string;
-  fu1DueAt?: string;
-  fu1SentAt?: string;
-  fu2DueAt?: string;
-  fu2SentAt?: string;
-  breakupDueAt?: string;
-  breakupSentAt?: string;
-  threadId?: string;
-  lastMessageId?: string;
-  createdAt?: string;
-  updatedAt?: string;
+export interface DiscoveredEmail {
+  email: string;
+  type: EmailType;
+  confidence: number;
+  domainValid?: boolean;
+  validationReason?: string;
 }
 
 export interface Lead {
@@ -145,6 +107,8 @@ export interface Lead {
   showUrl: string;
   feedUrl?: string;
   email: string;
+  emailType?: EmailType;
+  emailConfidence?: number;
   subscribers: number;
   niche: string;
   tags?: string[];
@@ -168,6 +132,8 @@ export interface StagedLead {
   showUrl: string;
   feedUrl?: string;
   email: string;
+  emailType?: EmailType;
+  emailConfidence?: number;
   subscribers: number;
   niche: string;
   tags: string[];
@@ -177,6 +143,53 @@ export interface StagedLead {
   dateScraped: string;
   selected?: boolean;
 }
+
+export type PipelineStage =
+  | 'drafted'
+  | 'initial_sent'
+  | 'fu1_due'
+  | 'fu1_sent'
+  | 'fu2_due'
+  | 'fu2_sent'
+  | 'breakup_due'
+  | 'breakup_sent'
+  | 'responded'
+  | 'booked'
+  | 'declined'
+  | 'unresponsive';
+
+export type SequenceStep = 'initial' | 'follow_up_1' | 'follow_up_2' | 'breakup';
+
+export interface SequenceTouchpoint {
+  subject: string;
+  body: string;
+  talkingPoints?: string[];
+  delayDays: number;
+  sentAt?: string;
+  messageId?: string;
+}
+
+export interface OutreachSequence {
+  id?: number;
+  leadId: number;
+  clientId: string;
+  initial: SequenceTouchpoint;
+  followUp1: SequenceTouchpoint;
+  followUp2: SequenceTouchpoint;
+  breakup: SequenceTouchpoint;
+  pipelineStage: PipelineStage;
+  threadId?: string;
+  lastMessageId?: string;
+  initialSentAt?: string;
+  fu1DueAt?: string;
+  fu1SentAt?: string;
+  fu2DueAt?: string;
+  fu2SentAt?: string;
+  breakupDueAt?: string;
+  breakupSentAt?: string;
+  updatedAt?: string;
+}
+
 
 export interface ClientICP {
   targetGeos?: string[];
@@ -267,31 +280,39 @@ export interface JobLogEntry {
   metadata?: any;
 }
 
-// --- Session & Multi-Actor Auth Contracts ---
-export type AuthType = 'firebase_id_token' | 'agent_key' | 'credentials';
+// ==========================================
+// SESSION, AGENT AUTH & MCP PROTOCOL TYPES
+// ==========================================
 
 export interface UserSession {
-  id: string;               // Session token UUID / hash
-  userId: string;           // Firebase UID or Agent Identifier
-  email: string;            // User or Agent email
-  tenantId: string;         // Active bound workspace ID
-  role: UserRole;           // User role in this workspace
-  authType: AuthType;       // Auth mechanism used
-  userAgent?: string;
-  ipAddress?: string;
+  id: string;
+  token: string;
+  userId: string;
+  email: string;
+  authType: 'credentials' | 'firebase_id_token' | 'agent_key' | 'anonymous';
+  tenantId: string;
+  role: UserRole;
   createdAt: string;
   expiresAt: string;
   revokedAt?: string | null;
-}
-
-export interface LoginSessionRequest {
-  authType: AuthType;
-  token?: string;           // Firebase ID token OR Agent API key
-  email?: string;           // Optional identifier
-  tenantId?: string;        // Target workspace
   clientMeta?: {
     clientName?: string;
     clientVersion?: string;
+    userAgent?: string;
+    ip?: string;
+  };
+}
+
+export interface LoginSessionRequest {
+  authType: 'credentials' | 'firebase_id_token' | 'agent_key' | 'anonymous';
+  token?: string;
+  email?: string;
+  password?: string;
+  tenantId?: string;
+  clientMeta?: {
+    clientName?: string;
+    clientVersion?: string;
+    userAgent?: string;
   };
 }
 
@@ -303,20 +324,9 @@ export interface LoginSessionResponse {
     uid: string;
     email: string;
     role: UserRole;
-    isAgent: boolean;
   };
-  activeTenant: {
-    id: string;
-    name: string;
-    slug: string;
-    plan: 'starter' | 'growth' | 'agency' | 'enterprise';
-  };
-  availableTenants: Tenant[];
-  agentKey?: {
-    key: string;
-    keyPrefix: string;
-    name: string;
-  };
+  activeTenantId?: string;
+  activeTenant?: Tenant;
 }
 
 export interface AgentAuthRequest {
@@ -327,27 +337,18 @@ export interface AgentAuthRequest {
 
 export interface AgentAuthResponse {
   success: boolean;
-  authenticated: boolean;
+  sessionToken: string;
   agentId: string;
   role: UserRole;
   tenantId: string;
-  sessionToken: string;
   expiresAt: string;
-  mcp: {
-    endpoint: string;
-    protocolVersion: string;
-    transport?: string;
-    toolsCount: number;
-    tools?: Array<{ name: string; description: string }>;
-  };
 }
 
-// --- Lightweight MCP Protocol Contracts ---
 export interface JsonRpcRequest {
   jsonrpc: '2.0';
-  id?: string | number | null;
+  id: string | number | null;
   method: string;
-  params?: Record<string, any>;
+  params?: any;
 }
 
 export interface JsonRpcResponse {
@@ -369,6 +370,22 @@ export interface McpToolDefinition {
     properties: Record<string, any>;
     required?: string[];
   };
+}
+
+export interface UserAgentKey {
+  id: string;
+  key?: string;
+  keyHash?: string;
+  keyPrefix: string;
+  userId: string;
+  email: string;
+  tenantId: string;
+  role: UserRole;
+  name: string;
+  createdAt: string;
+  expiresAt?: string;
+  lastUsedAt?: string;
+  revokedAt?: string;
 }
 
 

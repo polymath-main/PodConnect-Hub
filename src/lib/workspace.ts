@@ -1,5 +1,5 @@
 import { getAccessToken } from './firebase';
-import { Client, Milestone } from '../types';
+import { Client, Milestone, Lead } from '../types';
 
 /**
  * Base helper for authorized Google Workspace fetch
@@ -360,6 +360,106 @@ export async function updateClientInMasterSheet(
     console.warn('Failed to update in-place, falling back to append:', err);
     return syncClientToMasterSheet(spreadsheetId, client);
   }
+}
+
+/**
+ * Synchronizes podcast leads into a dedicated 'Podcast Leads' tab of the Master Spreadsheet
+ */
+export async function syncLeadsToMasterSheet(
+  spreadsheetId: string,
+  leads: Lead[]
+): Promise<{ updatedRange: string; count: number }> {
+  if (leads.length === 0) {
+    return { updatedRange: '', count: 0 };
+  }
+
+  // Ensure "Podcast Leads" sheet tab exists
+  try {
+    const meta = await authorizedFetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}`);
+    const sheets = meta.sheets || [];
+    const hasLeadsTab = sheets.some((s: any) => s.properties?.title === 'Podcast Leads');
+    if (!hasLeadsTab) {
+      await authorizedFetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`, {
+        method: 'POST',
+        body: JSON.stringify({
+          requests: [
+            {
+              addSheet: {
+                properties: {
+                  title: 'Podcast Leads',
+                  gridProperties: { frozenRowCount: 1 },
+                },
+              },
+            },
+          ],
+        }),
+      });
+
+      // Write header row
+      const headers = [
+        'ID',
+        'Client ID',
+        'Show Name',
+        'Host Name',
+        'Platform',
+        'Contact Email',
+        'Email Type',
+        'Confidence',
+        'Subscribers',
+        'Niche',
+        'Pipeline Stage',
+        'Status',
+        'Score',
+        'Show URL',
+        'Date Added',
+      ];
+      await authorizedFetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Podcast%20Leads!A1:O1?valueInputOption=USER_ENTERED`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({
+            range: 'Podcast Leads!A1:O1',
+            majorDimension: 'ROWS',
+            values: [headers],
+          }),
+        }
+      );
+    }
+  } catch (tabErr) {
+    console.warn('Error checking/creating Podcast Leads tab:', tabErr);
+  }
+
+  // Format rows with formulas/links
+  const rows = leads.map((l) => [
+    l.id,
+    l.clientId || 'Unassigned',
+    l.showName,
+    l.hostName || 'Host',
+    l.platform,
+    l.email || 'N/A',
+    l.emailType || 'direct',
+    `${Math.round((l.emailConfidence ?? 1.0) * 100)}%`,
+    l.subscribers,
+    l.niche,
+    l.pipelineStage || 'drafted',
+    l.status,
+    l.score,
+    l.showUrl ? `=HYPERLINK("${l.showUrl}", "${l.showName?.replace(/"/g, '""')}")` : '',
+    l.dateAdded || new Date().toISOString(),
+  ]);
+
+  const appendRes = await authorizedFetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Podcast%20Leads!A:O:append?valueInputOption=USER_ENTERED`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ values: rows }),
+    }
+  );
+
+  return {
+    updatedRange: appendRes.updates?.updatedRange || 'Podcast Leads!A:O',
+    count: leads.length,
+  };
 }
 
 // ==========================================

@@ -1,8 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
 import path from 'path';
-import fs from 'fs';
-import os from 'os';
-import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import {
   Tenant,
@@ -15,57 +12,25 @@ import {
   OutreachSequence,
   PipelineStage,
   UserSession,
+  UserAgentKey,
 } from '../types';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-function resolveDatabasePath(): string {
-  if (process.env.DB_PATH) {
-    return process.env.DB_PATH;
-  }
-  const defaultRepoDb = path.resolve(__dirname, '../../podconnect_leads.db');
-
-  // Serverless runtime detection (Vercel, AWS Lambda) where filesystem is read-only except tmp directory
-  if (process.env.VERCEL || process.env.NOW_REGION || process.env.AWS_LAMBDA_FUNCTION_NAME) {
-    const tmpDir = process.env.TMPDIR || os.tmpdir() || '/tmp';
-    const tmpDbPath = path.join(tmpDir, 'podconnect_leads.db');
-    if (!fs.existsSync(tmpDbPath) && fs.existsSync(defaultRepoDb)) {
-      try {
-        fs.copyFileSync(defaultRepoDb, tmpDbPath);
-        return tmpDbPath;
-      } catch (err) {
-        console.warn('[DB] Failed to seed tmp podconnect_leads.db from repo:', err);
-      }
-    } else if (fs.existsSync(tmpDbPath)) {
-      return tmpDbPath;
-    }
-  }
-
-  return defaultRepoDb;
-}
-
-const DB_PATH = resolveDatabasePath();
+const DB_PATH = process.env.DATABASE_PATH
+  ? path.resolve(process.env.DATABASE_PATH)
+  : path.resolve(__dirname, '../../podconnect_leads.db');
 
 export class DatabaseService {
   private db: DatabaseSync;
 
   constructor(dbPath: string = DB_PATH) {
-    try {
-      this.db = new DatabaseSync(dbPath);
-    } catch (err) {
-      console.warn(`[DB] Failed to open SQLite at ${dbPath}, falling back to :memory:`, err);
-      this.db = new DatabaseSync(':memory:');
-    }
+    this.db = new DatabaseSync(dbPath);
     this.init();
   }
 
   private init() {
-    try {
-      this.db.exec('PRAGMA journal_mode = WAL;');
-    } catch (err) {
-      console.warn('[DB] PRAGMA journal_mode = WAL notice:', err);
-    }
+    this.db.exec('PRAGMA journal_mode = WAL;');
 
     // 1. Tenants table
     this.db.exec(`
@@ -96,6 +61,7 @@ export class DatabaseService {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS staged_leads (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tenant_id TEXT DEFAULT 'tenant_default',
         client_id TEXT,
         show_name TEXT,
         host_name TEXT,
@@ -103,11 +69,14 @@ export class DatabaseService {
         show_url TEXT,
         feed_url TEXT,
         email TEXT,
+        email_type TEXT DEFAULT 'direct',
+        email_confidence REAL DEFAULT 1.0,
         subscribers INTEGER,
         niche TEXT,
         tags TEXT,
         score REAL,
         location TEXT,
+        notes TEXT,
         date_scraped TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(client_id, show_name)
       );
@@ -117,6 +86,7 @@ export class DatabaseService {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS leads (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tenant_id TEXT DEFAULT 'tenant_default',
         client_id TEXT,
         show_name TEXT,
         host_name TEXT,
@@ -124,6 +94,8 @@ export class DatabaseService {
         show_url TEXT,
         feed_url TEXT,
         email TEXT,
+        email_type TEXT DEFAULT 'direct',
+        email_confidence REAL DEFAULT 1.0,
         subscribers INTEGER,
         niche TEXT,
         score REAL,
@@ -170,23 +142,20 @@ export class DatabaseService {
       );
     `);
 
-    // 7. Outreach Sequences table (Multi-Touch Pipeline & Cadence Engine)
+    // 7. Outreach sequences table
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS outreach_sequences (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        tenant_id TEXT NOT NULL DEFAULT 'tenant_default',
-        lead_id INTEGER NOT NULL UNIQUE,
+        tenant_id TEXT NOT NULL,
+        lead_id INTEGER NOT NULL,
         client_id TEXT NOT NULL,
-        initial_subject TEXT,
-        initial_body TEXT,
-        initial_talking_points TEXT,
-        fu1_subject TEXT,
-        fu1_body TEXT,
-        fu2_subject TEXT,
-        fu2_body TEXT,
-        breakup_subject TEXT,
-        breakup_body TEXT,
+        initial TEXT NOT NULL,
+        follow_up_1 TEXT NOT NULL,
+        follow_up_2 TEXT NOT NULL,
+        breakup TEXT NOT NULL,
         pipeline_stage TEXT NOT NULL DEFAULT 'drafted',
+        thread_id TEXT,
+        last_message_id TEXT,
         initial_sent_at TIMESTAMP,
         fu1_due_at TIMESTAMP,
         fu1_sent_at TIMESTAMP,
@@ -194,57 +163,47 @@ export class DatabaseService {
         fu2_sent_at TIMESTAMP,
         breakup_due_at TIMESTAMP,
         breakup_sent_at TIMESTAMP,
-        thread_id TEXT,
-        last_message_id TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(tenant_id, lead_id)
       );
     `);
-    this.db.exec('CREATE INDEX IF NOT EXISTS idx_seq_tenant_lead ON outreach_sequences(tenant_id, lead_id);');
-    this.db.exec('CREATE INDEX IF NOT EXISTS idx_seq_stage ON outreach_sequences(pipeline_stage);');
 
-    // 8. Sessions table (Multi-Actor Auth & Session Management)
+    // 8. Unified Sessions table
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
+        token TEXT UNIQUE NOT NULL,
         user_id TEXT NOT NULL,
         email TEXT NOT NULL,
+        auth_type TEXT NOT NULL,
         tenant_id TEXT NOT NULL,
         role TEXT NOT NULL DEFAULT 'member',
-        auth_type TEXT NOT NULL,
-        user_agent TEXT,
-        ip_address TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         expires_at TIMESTAMP NOT NULL,
         revoked_at TIMESTAMP,
-        FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+        client_meta TEXT
       );
     `);
-    this.db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);');
-    this.db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);');
 
-    // 9. Agent API Keys table (Multi-Tenant User Agent Key & MCP Gateway)
+    // 9. User Agent API Keys table
     this.db.exec(`
-      CREATE TABLE IF NOT EXISTS agent_api_keys (
+      CREATE TABLE IF NOT EXISTS user_agent_keys (
         id TEXT PRIMARY KEY,
-        raw_key TEXT NOT NULL UNIQUE,
+        key TEXT UNIQUE NOT NULL,
         key_prefix TEXT NOT NULL,
         user_id TEXT NOT NULL,
         email TEXT NOT NULL,
         tenant_id TEXT NOT NULL,
-        name TEXT NOT NULL DEFAULT 'Personal Agent Key',
-        role TEXT NOT NULL DEFAULT 'owner',
+        role TEXT NOT NULL DEFAULT 'member',
+        name TEXT NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        expires_at TIMESTAMP,
         last_used_at TIMESTAMP,
-        revoked_at TIMESTAMP,
-        FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+        revoked_at TIMESTAMP
       );
     `);
-    this.db.exec('CREATE INDEX IF NOT EXISTS idx_agent_keys_user ON agent_api_keys(user_id);');
-    this.db.exec('CREATE INDEX IF NOT EXISTS idx_agent_keys_tenant ON agent_api_keys(tenant_id);');
-    this.db.exec('CREATE INDEX IF NOT EXISTS idx_agent_keys_raw ON agent_api_keys(raw_key);');
 
-    // Migrations: Add tenant_id to staged_leads and leads if not present
+    // Migrations: Add tenant_id, email_type, email_confidence to staged_leads and leads if not present
     this.runMigrations();
 
     // Ensure default system workspace exists
@@ -268,6 +227,15 @@ export class DatabaseService {
         console.warn('Migration note on staged_leads:', err);
       }
     }
+    if (!stagedCols.includes('email_type')) {
+      try { this.db.exec("ALTER TABLE staged_leads ADD COLUMN email_type TEXT DEFAULT 'direct'"); } catch {}
+    }
+    if (!stagedCols.includes('email_confidence')) {
+      try { this.db.exec('ALTER TABLE staged_leads ADD COLUMN email_confidence REAL DEFAULT 1.0'); } catch {}
+    }
+    if (!stagedCols.includes('notes')) {
+      try { this.db.exec('ALTER TABLE staged_leads ADD COLUMN notes TEXT'); } catch {}
+    }
 
     // Check leads columns
     const leadCols = (this.db.prepare('PRAGMA table_info(leads)').all() as any[]).map((c) => c.name);
@@ -278,6 +246,12 @@ export class DatabaseService {
       } catch (err) {
         console.warn('Migration note on leads:', err);
       }
+    }
+    if (!leadCols.includes('email_type')) {
+      try { this.db.exec("ALTER TABLE leads ADD COLUMN email_type TEXT DEFAULT 'direct'"); } catch {}
+    }
+    if (!leadCols.includes('email_confidence')) {
+      try { this.db.exec('ALTER TABLE leads ADD COLUMN email_confidence REAL DEFAULT 1.0'); } catch {}
     }
     if (!leadCols.includes('tags')) {
       try { this.db.exec('ALTER TABLE leads ADD COLUMN tags TEXT'); } catch {}
@@ -296,8 +270,13 @@ export class DatabaseService {
       this.db.exec('CREATE INDEX IF NOT EXISTS idx_jobs_tenant ON jobs(tenant_id, status)');
       this.db.exec('CREATE INDEX IF NOT EXISTS idx_job_logs_job ON job_logs(job_id)');
       this.db.exec('CREATE INDEX IF NOT EXISTS idx_members_user ON tenant_members(user_id)');
+      this.db.exec('CREATE INDEX IF NOT EXISTS idx_seq_tenant_lead ON outreach_sequences(tenant_id, lead_id)');
+      this.db.exec('CREATE INDEX IF NOT EXISTS idx_seq_stage ON outreach_sequences(tenant_id, pipeline_stage)');
+      this.db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token)');
+      this.db.exec('CREATE INDEX IF NOT EXISTS idx_user_agent_keys_key ON user_agent_keys(key)');
     } catch {}
   }
+
 
   // ==========================================
   // TENANT & MEMBERS MANAGEMENT
@@ -482,6 +461,8 @@ export class DatabaseService {
       showUrl: r.show_url,
       feedUrl: r.feed_url,
       email: r.email,
+      emailType: r.email_type || 'direct',
+      emailConfidence: r.email_confidence !== null && r.email_confidence !== undefined ? Number(r.email_confidence) : 1.0,
       subscribers: r.subscribers || 0,
       niche: r.niche,
       tags: typeof r.tags === 'string' ? JSON.parse(r.tags || '[]') : r.tags || [],
@@ -498,12 +479,14 @@ export class DatabaseService {
       this.db.prepare(`
         INSERT INTO staged_leads (
           tenant_id, client_id, show_name, host_name, platform, show_url, feed_url,
-          email, subscribers, niche, tags, score, location
+          email, email_type, email_confidence, subscribers, niche, tags, score, location
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(client_id, show_name) DO UPDATE SET
           tenant_id = excluded.tenant_id,
           email = CASE WHEN excluded.email != '' THEN excluded.email ELSE staged_leads.email END,
+          email_type = CASE WHEN excluded.email != '' THEN excluded.email_type ELSE staged_leads.email_type END,
+          email_confidence = CASE WHEN excluded.email != '' THEN excluded.email_confidence ELSE staged_leads.email_confidence END,
           score = excluded.score,
           tags = excluded.tags,
           subscribers = excluded.subscribers
@@ -516,6 +499,8 @@ export class DatabaseService {
         lead.show_url || lead.showUrl || '',
         lead.feed_url || lead.feedUrl || '',
         lead.email || '',
+        lead.email_type || lead.emailType || 'direct',
+        lead.email_confidence !== undefined ? Number(lead.email_confidence) : (lead.emailConfidence !== undefined ? Number(lead.emailConfidence) : 1.0),
         lead.subscribers || 2500,
         lead.niche || '',
         tagsJson,
@@ -539,6 +524,8 @@ export class DatabaseService {
       platform: 'platform',
       showUrl: 'show_url',
       email: 'email',
+      emailType: 'email_type',
+      emailConfidence: 'email_confidence',
       subscribers: 'subscribers',
       niche: 'niche',
       score: 'score',
@@ -588,13 +575,15 @@ export class DatabaseService {
       this.db.prepare(`
         INSERT INTO leads (
           tenant_id, client_id, show_name, host_name, platform, show_url, feed_url,
-          email, subscribers, niche, score, status, tags, location
+          email, email_type, email_confidence, subscribers, niche, score, status, tags, location
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Imported', ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Imported', ?, ?)
         ON CONFLICT(client_id, show_name) DO UPDATE SET
           tenant_id = excluded.tenant_id,
           status = 'Imported',
           email = CASE WHEN excluded.email != '' THEN excluded.email ELSE leads.email END,
+          email_type = CASE WHEN excluded.email != '' THEN excluded.email_type ELSE leads.email_type END,
+          email_confidence = CASE WHEN excluded.email != '' THEN excluded.email_confidence ELSE leads.email_confidence END,
           subscribers = excluded.subscribers,
           tags = excluded.tags
       `).run(
@@ -606,6 +595,8 @@ export class DatabaseService {
         row.show_url,
         row.feed_url,
         row.email,
+        row.email_type || 'direct',
+        row.email_confidence !== null && row.email_confidence !== undefined ? row.email_confidence : 1.0,
         row.subscribers,
         row.niche,
         row.score,
@@ -629,6 +620,8 @@ export class DatabaseService {
           showUrl: created.show_url,
           feedUrl: created.feed_url,
           email: created.email,
+          emailType: created.email_type || 'direct',
+          emailConfidence: created.email_confidence !== null && created.email_confidence !== undefined ? Number(created.email_confidence) : 1.0,
           subscribers: created.subscribers,
           niche: created.niche,
           tags: typeof created.tags === 'string' ? JSON.parse(created.tags || '[]') : created.tags || [],
@@ -654,42 +647,37 @@ export class DatabaseService {
     tag?: string;
     status?: string;
     search?: string;
-    pipelineStage?: string;
   } = {}): Lead[] {
     let query = `
-      SELECT leads.*, seq.pipeline_stage, seq.initial_sent_at, seq.fu1_due_at, seq.fu1_sent_at, seq.fu2_due_at, seq.fu2_sent_at, seq.breakup_due_at, seq.breakup_sent_at
-      FROM leads
-      LEFT JOIN outreach_sequences seq ON seq.lead_id = leads.id AND (seq.tenant_id = leads.tenant_id OR seq.tenant_id = 'tenant_default')
-      WHERE (leads.tenant_id = ? OR leads.tenant_id IS NULL)
+      SELECT l.*, s.pipeline_stage
+      FROM leads l
+      LEFT JOIN outreach_sequences s ON l.id = s.lead_id AND (s.tenant_id = l.tenant_id OR s.tenant_id = ?)
+      WHERE (l.tenant_id = ? OR l.tenant_id IS NULL)
     `;
-    const params: any[] = [tenantId];
+    const params: any[] = [tenantId, tenantId];
 
     if (filters.clientId && filters.clientId !== 'ALL') {
-      query += ' AND leads.client_id = ?';
+      query += ' AND l.client_id = ?';
       params.push(filters.clientId);
     }
     if (filters.niche) {
-      query += ' AND leads.niche LIKE ?';
+      query += ' AND l.niche LIKE ?';
       params.push(`%${filters.niche}%`);
     }
     if (filters.tag) {
-      query += ' AND leads.tags LIKE ?';
+      query += ' AND l.tags LIKE ?';
       params.push(`%${filters.tag}%`);
     }
     if (filters.status && filters.status !== 'ALL') {
-      query += ' AND leads.status = ?';
+      query += ' AND l.status = ?';
       params.push(filters.status);
     }
-    if (filters.pipelineStage && filters.pipelineStage !== 'ALL') {
-      query += ' AND seq.pipeline_stage = ?';
-      params.push(filters.pipelineStage);
-    }
     if (filters.search) {
-      query += ' AND (leads.show_name LIKE ? OR leads.host_name LIKE ? OR leads.email LIKE ?)';
+      query += ' AND (l.show_name LIKE ? OR l.host_name LIKE ? OR l.email LIKE ?)';
       params.push(`%${filters.search}%`, `%${filters.search}%`, `%${filters.search}%`);
     }
 
-    query += ' ORDER BY leads.id DESC';
+    query += ' ORDER BY l.id DESC';
 
     const rows = this.db.prepare(query).all(...params) as any[];
     return rows.map((r) => ({
@@ -702,6 +690,8 @@ export class DatabaseService {
       showUrl: r.show_url,
       feedUrl: r.feed_url,
       email: r.email,
+      emailType: r.email_type || 'direct',
+      emailConfidence: r.email_confidence !== null && r.email_confidence !== undefined ? Number(r.email_confidence) : 1.0,
       subscribers: r.subscribers || 0,
       niche: r.niche,
       tags: typeof r.tags === 'string' ? JSON.parse(r.tags || '[]') : r.tags || [],
@@ -710,16 +700,17 @@ export class DatabaseService {
       dateAdded: r.date_added,
       notes: r.notes,
       location: r.location,
-      pipelineStage: (r.pipeline_stage as PipelineStage) || (
-        r.status === 'Dispatched' || r.status === 'Sent' ? 'initial_sent' :
-        r.status === 'Booked' ? 'booked' :
-        r.status === 'Responded' || r.status === 'Replied' ? 'responded' : 'drafted'
-      ),
+      pipelineStage: r.pipeline_stage as PipelineStage | undefined,
     }));
   }
 
   public getLeadById(tenantId: string, id: number): Lead | null {
-    const r = this.db.prepare('SELECT * FROM leads WHERE id = ? AND (tenant_id = ? OR tenant_id IS NULL)').get(id, tenantId) as any;
+    const r = this.db.prepare(`
+      SELECT l.*, s.pipeline_stage
+      FROM leads l
+      LEFT JOIN outreach_sequences s ON l.id = s.lead_id AND (s.tenant_id = l.tenant_id OR s.tenant_id = ?)
+      WHERE l.id = ? AND (l.tenant_id = ? OR l.tenant_id IS NULL)
+    `).get(tenantId, id, tenantId) as any;
     if (!r) return null;
     return {
       id: r.id,
@@ -731,6 +722,8 @@ export class DatabaseService {
       showUrl: r.show_url,
       feedUrl: r.feed_url,
       email: r.email,
+      emailType: r.email_type || 'direct',
+      emailConfidence: r.email_confidence !== null && r.email_confidence !== undefined ? Number(r.email_confidence) : 1.0,
       subscribers: r.subscribers || 0,
       niche: r.niche,
       tags: typeof r.tags === 'string' ? JSON.parse(r.tags || '[]') : r.tags || [],
@@ -739,6 +732,7 @@ export class DatabaseService {
       dateAdded: r.date_added,
       notes: r.notes,
       location: r.location,
+      pipelineStage: r.pipeline_stage as PipelineStage | undefined,
     };
   }
 
@@ -752,6 +746,8 @@ export class DatabaseService {
       platform: 'platform',
       showUrl: 'show_url',
       email: 'email',
+      emailType: 'email_type',
+      emailConfidence: 'email_confidence',
       subscribers: 'subscribers',
       niche: 'niche',
       score: 'score',
@@ -783,6 +779,7 @@ export class DatabaseService {
     return true;
   }
 
+
   public deleteLead(tenantId: string, id: number): boolean {
     this.db.prepare('DELETE FROM leads WHERE id = ? AND (tenant_id = ? OR tenant_id IS NULL)').run(id, tenantId);
     return true;
@@ -795,9 +792,9 @@ export class DatabaseService {
     this.db.prepare(`
       INSERT INTO leads (
         tenant_id, client_id, show_name, host_name, platform, show_url, feed_url,
-        email, subscribers, niche, tags, score, status, location
+        email, email_type, email_confidence, subscribers, niche, tags, score, status, location
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Imported', ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Imported', ?)
       ON CONFLICT(client_id, show_name) DO UPDATE SET
         tenant_id = excluded.tenant_id,
         client_id = excluded.client_id
@@ -810,6 +807,8 @@ export class DatabaseService {
       lead.show_url,
       lead.feed_url,
       lead.email,
+      lead.email_type || 'direct',
+      lead.email_confidence !== null && lead.email_confidence !== undefined ? lead.email_confidence : 1.0,
       lead.subscribers,
       lead.niche,
       lead.tags,
@@ -817,6 +816,7 @@ export class DatabaseService {
       lead.location
     );
     return true;
+
   }
 
   public updateLeadStatus(tenantId: string, id: number, status: string): boolean {
@@ -998,136 +998,90 @@ export class DatabaseService {
   }
 
   // ==========================================
-  // MULTI-TOUCH OUTREACH SEQUENCES & CADENCE
+  // OUTREACH SEQUENCES & CADENCE REPOSITORY
   // ==========================================
 
-  public getSequenceByLeadId(tenantId: string, leadId: number): OutreachSequence | null {
-    const row = this.db.prepare(`
-      SELECT * FROM outreach_sequences
-      WHERE (tenant_id = ? OR tenant_id = 'tenant_default') AND lead_id = ?
-    `).get(tenantId, leadId) as any;
+  public saveSequence(tenantId: string, seq: OutreachSequence): OutreachSequence {
+    const initialJson = JSON.stringify(seq.initial);
+    const fu1Json = JSON.stringify(seq.followUp1);
+    const fu2Json = JSON.stringify(seq.followUp2);
+    const breakupJson = JSON.stringify(seq.breakup);
 
-    if (!row) return null;
+    this.db.prepare(`
+      INSERT INTO outreach_sequences (
+        tenant_id, lead_id, client_id, initial, follow_up_1, follow_up_2, breakup,
+        pipeline_stage, thread_id, last_message_id, initial_sent_at, fu1_due_at,
+        fu1_sent_at, fu2_due_at, fu2_sent_at, breakup_due_at, breakup_sent_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(tenant_id, lead_id) DO UPDATE SET
+        client_id = excluded.client_id,
+        initial = excluded.initial,
+        follow_up_1 = excluded.follow_up_1,
+        follow_up_2 = excluded.follow_up_2,
+        breakup = excluded.breakup,
+        pipeline_stage = excluded.pipeline_stage,
+        thread_id = COALESCE(excluded.thread_id, outreach_sequences.thread_id),
+        last_message_id = COALESCE(excluded.last_message_id, outreach_sequences.last_message_id),
+        updated_at = CURRENT_TIMESTAMP
+    `).run(
+      tenantId,
+      seq.leadId,
+      seq.clientId,
+      initialJson,
+      fu1Json,
+      fu2Json,
+      breakupJson,
+      seq.pipelineStage || 'drafted',
+      seq.threadId || null,
+      seq.lastMessageId || null,
+      seq.initialSentAt || null,
+      seq.fu1DueAt || null,
+      seq.fu1SentAt || null,
+      seq.fu2DueAt || null,
+      seq.fu2SentAt || null,
+      seq.breakupDueAt || null,
+      seq.breakupSentAt || null
+    );
 
-    let talkingPoints: string[] = [];
-    try {
-      talkingPoints = row.initial_talking_points ? JSON.parse(row.initial_talking_points) : [];
-    } catch {}
-
-    return {
-      id: row.id,
-      tenantId: row.tenant_id,
-      leadId: row.lead_id,
-      clientId: row.client_id,
-      initial: {
-        subject: row.initial_subject || '',
-        body: row.initial_body || '',
-        delayDays: 0,
-        talkingPoints,
-      },
-      followUp1: {
-        subject: row.fu1_subject || '',
-        body: row.fu1_body || '',
-        delayDays: 3,
-      },
-      followUp2: {
-        subject: row.fu2_subject || '',
-        body: row.fu2_body || '',
-        delayDays: 4,
-      },
-      breakup: {
-        subject: row.breakup_subject || '',
-        body: row.breakup_body || '',
-        delayDays: 7,
-      },
-      pipelineStage: row.pipeline_stage || 'drafted',
-      initialSentAt: row.initial_sent_at,
-      fu1DueAt: row.fu1_due_at,
-      fu1SentAt: row.fu1_sent_at,
-      fu2DueAt: row.fu2_due_at,
-      fu2SentAt: row.fu2_sent_at,
-      breakupDueAt: row.breakup_due_at,
-      breakupSentAt: row.breakup_sent_at,
-      threadId: row.thread_id,
-      lastMessageId: row.last_message_id,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    };
+    return this.getSequenceByLeadId(tenantId, seq.leadId) || seq;
   }
 
-  public saveSequence(tenantId: string, seq: OutreachSequence): OutreachSequence {
-    const talkingPointsJson = JSON.stringify(seq.initial.talkingPoints || []);
-    const existing = this.db.prepare(`
-      SELECT id FROM outreach_sequences WHERE lead_id = ?
-    `).get(seq.leadId) as any;
+  public getSequenceByLeadId(tenantId: string, leadId: number): OutreachSequence | null {
+    const r = this.db.prepare(`
+      SELECT * FROM outreach_sequences
+      WHERE lead_id = ? AND (tenant_id = ? OR tenant_id = 'tenant_default')
+    `).get(leadId, tenantId) as any;
 
-    if (existing) {
-      this.db.prepare(`
-        UPDATE outreach_sequences SET
-          tenant_id = ?,
-          client_id = ?,
-          initial_subject = ?,
-          initial_body = ?,
-          initial_talking_points = ?,
-          fu1_subject = ?,
-          fu1_body = ?,
-          fu2_subject = ?,
-          fu2_body = ?,
-          breakup_subject = ?,
-          breakup_body = ?,
-          pipeline_stage = COALESCE(?, pipeline_stage),
-          updated_at = CURRENT_TIMESTAMP
-        WHERE lead_id = ?
-      `).run(
-        tenantId,
-        seq.clientId,
-        seq.initial.subject,
-        seq.initial.body,
-        talkingPointsJson,
-        seq.followUp1.subject,
-        seq.followUp1.body,
-        seq.followUp2.subject,
-        seq.followUp2.body,
-        seq.breakup.subject,
-        seq.breakup.body,
-        seq.pipelineStage,
-        seq.leadId
-      );
-    } else {
-      this.db.prepare(`
-        INSERT INTO outreach_sequences (
-          tenant_id, lead_id, client_id,
-          initial_subject, initial_body, initial_talking_points,
-          fu1_subject, fu1_body,
-          fu2_subject, fu2_body,
-          breakup_subject, breakup_body,
-          pipeline_stage
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        tenantId,
-        seq.leadId,
-        seq.clientId,
-        seq.initial.subject,
-        seq.initial.body,
-        talkingPointsJson,
-        seq.followUp1.subject,
-        seq.followUp1.body,
-        seq.followUp2.subject,
-        seq.followUp2.body,
-        seq.breakup.subject,
-        seq.breakup.body,
-        seq.pipelineStage || 'drafted'
-      );
-    }
+    if (!r) return null;
 
-    return this.getSequenceByLeadId(tenantId, seq.leadId)!;
+    return {
+      id: r.id,
+      leadId: r.lead_id,
+      clientId: r.client_id,
+      initial: typeof r.initial === 'string' ? JSON.parse(r.initial) : r.initial,
+      followUp1: typeof r.follow_up_1 === 'string' ? JSON.parse(r.follow_up_1) : r.follow_up_1,
+      followUp2: typeof r.follow_up_2 === 'string' ? JSON.parse(r.follow_up_2) : r.follow_up_2,
+      breakup: typeof r.breakup === 'string' ? JSON.parse(r.breakup) : r.breakup,
+      pipelineStage: r.pipeline_stage as PipelineStage,
+      threadId: r.thread_id || undefined,
+      lastMessageId: r.last_message_id || undefined,
+      initialSentAt: r.initial_sent_at || undefined,
+      fu1DueAt: r.fu1_due_at || undefined,
+      fu1SentAt: r.fu1_sent_at || undefined,
+      fu2DueAt: r.fu2_due_at || undefined,
+      fu2SentAt: r.fu2_sent_at || undefined,
+      breakupDueAt: r.breakup_due_at || undefined,
+      breakupSentAt: r.breakup_sent_at || undefined,
+      updatedAt: r.updated_at || undefined,
+    };
   }
 
   public updateSequenceStage(
     tenantId: string,
     leadId: number,
     stage: PipelineStage,
-    metadata: {
+    extra: {
       initialSentAt?: string;
       fu1DueAt?: string;
       fu1SentAt?: string;
@@ -1138,218 +1092,184 @@ export class DatabaseService {
       threadId?: string;
       lastMessageId?: string;
     } = {}
-  ): void {
-    const updates: string[] = ['pipeline_stage = ?', 'updated_at = CURRENT_TIMESTAMP'];
-    const params: any[] = [stage];
+  ): boolean {
+    const sets = ['pipeline_stage = ?', 'updated_at = CURRENT_TIMESTAMP'];
+    const values: any[] = [stage];
 
-    if (metadata.initialSentAt !== undefined) {
-      updates.push('initial_sent_at = ?');
-      params.push(metadata.initialSentAt);
-    }
-    if (metadata.fu1DueAt !== undefined) {
-      updates.push('fu1_due_at = ?');
-      params.push(metadata.fu1DueAt);
-    }
-    if (metadata.fu1SentAt !== undefined) {
-      updates.push('fu1_sent_at = ?');
-      params.push(metadata.fu1SentAt);
-    }
-    if (metadata.fu2DueAt !== undefined) {
-      updates.push('fu2_due_at = ?');
-      params.push(metadata.fu2DueAt);
-    }
-    if (metadata.fu2SentAt !== undefined) {
-      updates.push('fu2_sent_at = ?');
-      params.push(metadata.fu2SentAt);
-    }
-    if (metadata.breakupDueAt !== undefined) {
-      updates.push('breakup_due_at = ?');
-      params.push(metadata.breakupDueAt);
-    }
-    if (metadata.breakupSentAt !== undefined) {
-      updates.push('breakup_sent_at = ?');
-      params.push(metadata.breakupSentAt);
-    }
-    if (metadata.threadId !== undefined) {
-      updates.push('thread_id = ?');
-      params.push(metadata.threadId);
-    }
-    if (metadata.lastMessageId !== undefined) {
-      updates.push('last_message_id = ?');
-      params.push(metadata.lastMessageId);
-    }
+    if (extra.initialSentAt) { sets.push('initial_sent_at = ?'); values.push(extra.initialSentAt); }
+    if (extra.fu1DueAt) { sets.push('fu1_due_at = ?'); values.push(extra.fu1DueAt); }
+    if (extra.fu1SentAt) { sets.push('fu1_sent_at = ?'); values.push(extra.fu1SentAt); }
+    if (extra.fu2DueAt) { sets.push('fu2_due_at = ?'); values.push(extra.fu2DueAt); }
+    if (extra.fu2SentAt) { sets.push('fu2_sent_at = ?'); values.push(extra.fu2SentAt); }
+    if (extra.breakupDueAt) { sets.push('breakup_due_at = ?'); values.push(extra.breakupDueAt); }
+    if (extra.breakupSentAt) { sets.push('breakup_sent_at = ?'); values.push(extra.breakupSentAt); }
+    if (extra.threadId) { sets.push('thread_id = ?'); values.push(extra.threadId); }
+    if (extra.lastMessageId) { sets.push('last_message_id = ?'); values.push(extra.lastMessageId); }
 
-    params.push(leadId);
-    this.db.prepare(`UPDATE outreach_sequences SET ${updates.join(', ')} WHERE lead_id = ?`).run(...params);
+    values.push(leadId, tenantId);
+
+    this.db.prepare(`
+      UPDATE outreach_sequences
+      SET ${sets.join(', ')}
+      WHERE lead_id = ? AND (tenant_id = ? OR tenant_id = 'tenant_default')
+    `).run(...values);
+
+    return true;
   }
 
-  // --- Session Management ---
-  createSession(session: Omit<UserSession, 'createdAt'>): UserSession {
+  // ==========================================
+  // UNIFIED USER SESSIONS & AGENT KEYS
+  // ==========================================
+
+  public createSession(sessionData: {
+    userId: string;
+    email: string;
+    authType: 'credentials' | 'firebase_id_token' | 'agent_key' | 'anonymous';
+    tenantId: string;
+    role: UserRole;
+    clientMeta?: any;
+    ttlHours?: number;
+  }): UserSession {
+    const id = `sess_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const randomBytes = Array.from({ length: 32 }, () => Math.floor(Math.random() * 256).toString(16).padStart(2, '0')).join('');
+    const token = `pcs_${id.slice(5)}_${randomBytes}`;
+
+    const ttlHours = sessionData.ttlHours || (sessionData.authType === 'agent_key' ? 720 : 24);
+    const expiresAt = new Date(Date.now() + ttlHours * 3600 * 1000).toISOString();
+    const clientMetaJson = sessionData.clientMeta ? JSON.stringify(sessionData.clientMeta) : null;
+
     this.db.prepare(`
-      INSERT INTO sessions (id, user_id, email, tenant_id, role, auth_type, user_agent, ip_address, expires_at, revoked_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO sessions (id, token, user_id, email, auth_type, tenant_id, role, expires_at, client_meta)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      session.id,
-      session.userId,
-      session.email,
-      session.tenantId,
-      session.role,
-      session.authType,
-      session.userAgent || null,
-      session.ipAddress || null,
-      session.expiresAt,
-      session.revokedAt || null
+      id,
+      token,
+      sessionData.userId,
+      sessionData.email,
+      sessionData.authType,
+      sessionData.tenantId,
+      sessionData.role,
+      expiresAt,
+      clientMetaJson
     );
-
-    const row = this.db.prepare('SELECT * FROM sessions WHERE id = ?').get(session.id) as any;
-    return this.mapSessionRow(row);
-  }
-
-  getSession(id: string): UserSession | null {
-    const row = this.db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as any;
-    if (!row) return null;
-    return this.mapSessionRow(row);
-  }
-
-  revokeSession(id: string): boolean {
-    const result = this.db.prepare(`
-      UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP WHERE id = ? AND revoked_at IS NULL
-    `).run(id);
-    return Number(result.changes) > 0;
-  }
-
-  revokeAllUserSessions(userId: string): number {
-    const result = this.db.prepare(`
-      UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ? AND revoked_at IS NULL
-    `).run(userId);
-    return Number(result.changes);
-  }
-
-  cleanExpiredSessions(): number {
-    const result = this.db.prepare(`
-      DELETE FROM sessions WHERE expires_at < CURRENT_TIMESTAMP OR (revoked_at IS NOT NULL AND datetime(revoked_at, '+30 days') < CURRENT_TIMESTAMP)
-    `).run();
-    return Number(result.changes);
-  }
-
-  private mapSessionRow(row: any): UserSession {
-    return {
-      id: row.id,
-      userId: row.user_id,
-      email: row.email,
-      tenantId: row.tenant_id,
-      role: row.role as UserRole,
-      authType: row.auth_type,
-      userAgent: row.user_agent || undefined,
-      ipAddress: row.ip_address || undefined,
-      createdAt: row.created_at,
-      expiresAt: row.expires_at,
-      revokedAt: row.revoked_at || null,
-    };
-  }
-
-  // ==========================================
-  // USER AGENT API KEYS MANAGEMENT
-  // ==========================================
-
-  public getOrCreateAgentKeyForUser(
-    userId: string,
-    email: string,
-    tenantId: string
-  ): { id: string; key: string; keyPrefix: string; name: string; createdAt: string; isNew: boolean } {
-    const existing = this.db.prepare(`
-      SELECT * FROM agent_api_keys 
-      WHERE user_id = ? AND tenant_id = ? AND revoked_at IS NULL 
-      ORDER BY created_at DESC LIMIT 1
-    `).get(userId, tenantId) as any;
-
-    if (existing) {
-      return {
-        id: existing.id,
-        key: existing.raw_key,
-        keyPrefix: existing.key_prefix,
-        name: existing.name,
-        createdAt: existing.created_at,
-        isNew: false,
-      };
-    }
-
-    const id = `key_${crypto.randomUUID().replace(/-/g, '')}`;
-    const rawKey = `pca_live_${crypto.randomBytes(24).toString('hex')}`;
-    const keyPrefix = `${rawKey.substring(0, 13)}...${rawKey.substring(rawKey.length - 4)}`;
-
-    this.db.prepare(`
-      INSERT INTO agent_api_keys (id, raw_key, key_prefix, user_id, email, tenant_id, name, role)
-      VALUES (?, ?, ?, ?, ?, ?, 'Personal Agent Key', 'owner')
-    `).run(id, rawKey, keyPrefix, userId, email, tenantId);
 
     return {
       id,
-      key: rawKey,
-      keyPrefix,
-      name: 'Personal Agent Key',
+      token,
+      userId: sessionData.userId,
+      email: sessionData.email,
+      authType: sessionData.authType,
+      tenantId: sessionData.tenantId,
+      role: sessionData.role,
       createdAt: new Date().toISOString(),
-      isNew: true,
+      expiresAt,
+      clientMeta: sessionData.clientMeta,
     };
   }
 
-  public validateUserAgentKey(rawKey: string): {
-    valid: boolean;
-    userId: string;
-    email: string;
-    tenantId: string;
-    role: UserRole;
-  } | null {
-    if (!rawKey || !rawKey.startsWith('pca_live_')) return null;
+  public getSession(token: string): UserSession | null {
+    if (!token) return null;
+    const r = this.db.prepare('SELECT * FROM sessions WHERE token = ?').get(token) as any;
+    if (!r) return null;
 
-    const row = this.db.prepare(`
-      SELECT * FROM agent_api_keys 
-      WHERE raw_key = ? AND revoked_at IS NULL
-    `).get(rawKey) as any;
+    return {
+      id: r.id,
+      token: r.token,
+      userId: r.user_id,
+      email: r.email,
+      authType: r.auth_type,
+      tenantId: r.tenant_id,
+      role: r.role as UserRole,
+      createdAt: r.created_at,
+      expiresAt: r.expires_at,
+      revokedAt: r.revoked_at || null,
+      clientMeta: r.client_meta ? JSON.parse(r.client_meta) : undefined,
+    };
+  }
 
-    if (!row) return null;
+  public revokeSession(token: string): boolean {
+    this.db.prepare('UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP WHERE token = ?').run(token);
+    return true;
+  }
 
-    this.db.prepare(`
-      UPDATE agent_api_keys SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?
-    `).run(row.id);
+  public cleanExpiredSessions(): number {
+    const res = this.db.prepare('DELETE FROM sessions WHERE expires_at < CURRENT_TIMESTAMP OR revoked_at IS NOT NULL').run();
+    return Number(res.changes || 0);
+  }
+
+  public validateUserAgentKey(key: string): { valid: boolean; userId: string; email: string; tenantId: string; role: UserRole } | null {
+    if (!key || !key.startsWith('pca_live_')) return null;
+
+    const r = this.db.prepare(`
+      SELECT * FROM user_agent_keys
+      WHERE key = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+    `).get(key) as any;
+
+    if (!r) return null;
+
+    // Update last used timestamp
+    try {
+      this.db.prepare('UPDATE user_agent_keys SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?').run(r.id);
+    } catch {}
 
     return {
       valid: true,
-      userId: row.user_id,
-      email: row.email,
-      tenantId: row.tenant_id,
-      role: (row.role as UserRole) || 'owner',
+      userId: r.user_id,
+      email: r.email,
+      tenantId: r.tenant_id,
+      role: r.role as UserRole,
     };
   }
 
-  public rotateAgentKey(
+  public createUserAgentKey(
     userId: string,
     email: string,
-    tenantId: string
-  ): { id: string; key: string; keyPrefix: string; name: string; createdAt: string } {
-    this.db.prepare(`
-      UPDATE agent_api_keys SET revoked_at = CURRENT_TIMESTAMP 
-      WHERE user_id = ? AND tenant_id = ? AND revoked_at IS NULL
-    `).run(userId, tenantId);
-
-    const id = `key_${crypto.randomUUID().replace(/-/g, '')}`;
-    const rawKey = `pca_live_${crypto.randomBytes(24).toString('hex')}`;
-    const keyPrefix = `${rawKey.substring(0, 13)}...${rawKey.substring(rawKey.length - 4)}`;
+    tenantId: string,
+    role: UserRole = 'member',
+    name: string = 'Autonomous Agent Key'
+  ): { id: string; key: string; keyPrefix: string } {
+    const id = `key_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    const randomHex = Array.from({ length: 24 }, () => Math.floor(Math.random() * 256).toString(16).padStart(2, '0')).join('');
+    const key = `pca_live_${randomHex}`;
+    const keyPrefix = key.slice(0, 12);
 
     this.db.prepare(`
-      INSERT INTO agent_api_keys (id, raw_key, key_prefix, user_id, email, tenant_id, name, role)
-      VALUES (?, ?, ?, ?, ?, ?, 'Rotated Agent Key', 'owner')
-    `).run(id, rawKey, keyPrefix, userId, email, tenantId);
+      INSERT INTO user_agent_keys (id, key, key_prefix, user_id, email, tenant_id, role, name)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, key, keyPrefix, userId, email, tenantId, role, name);
 
-    return {
-      id,
-      key: rawKey,
-      keyPrefix,
-      name: 'Rotated Agent Key',
-      createdAt: new Date().toISOString(),
-    };
+    return { id, key, keyPrefix };
+  }
+
+  public getUserAgentKeys(tenantId: string, userId: string): UserAgentKey[] {
+    const rows = this.db.prepare(`
+      SELECT id, key_prefix, user_id, email, tenant_id, role, name, created_at, expires_at, last_used_at, revoked_at
+      FROM user_agent_keys
+      WHERE tenant_id = ? AND (user_id = ? OR role = 'owner') AND revoked_at IS NULL
+      ORDER BY created_at DESC
+    `).all(tenantId, userId) as any[];
+
+    return rows.map((r) => ({
+      id: r.id,
+      keyPrefix: r.key_prefix,
+      userId: r.user_id,
+      email: r.email,
+      tenantId: r.tenant_id,
+      role: r.role as UserRole,
+      name: r.name,
+      createdAt: r.created_at,
+      expiresAt: r.expires_at || undefined,
+      lastUsedAt: r.last_used_at || undefined,
+      revokedAt: r.revoked_at || undefined,
+    }));
+  }
+
+  public revokeUserAgentKey(tenantId: string, id: string): boolean {
+    this.db.prepare('UPDATE user_agent_keys SET revoked_at = CURRENT_TIMESTAMP WHERE id = ? AND tenant_id = ?').run(id, tenantId);
+    return true;
   }
 }
 
 // Singleton database instance
 export const dbService = new DatabaseService();
+

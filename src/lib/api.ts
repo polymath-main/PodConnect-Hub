@@ -8,6 +8,7 @@ import {
   JobLogEntry,
   OutreachSequence,
   SequenceTouchpoint,
+  SequenceStep,
   PipelineStage,
   LoginSessionRequest,
   LoginSessionResponse,
@@ -310,7 +311,7 @@ class ApiClient {
     leadId: number,
     params: {
       accessToken: string;
-      touchpoint: SequenceTouchpoint;
+      touchpoint: SequenceStep | SequenceTouchpoint | string;
       customSubject?: string;
       customBody?: string;
     }

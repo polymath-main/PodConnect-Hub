@@ -19,11 +19,13 @@ import {
   Square,
   Layers,
   MapPin,
+  FileSpreadsheet,
 } from 'lucide-react';
 import { Lead, Client } from '../../types';
 import { LeadEditModal } from './LeadEditModal';
 import { api } from '../../lib/api';
 import { useToast } from '../ui/Toast';
+import { findOrCreateMasterSheet, syncLeadsToMasterSheet } from '../../lib/workspace';
 
 interface CentralLeadBankViewProps {
   clients: Client[];
@@ -49,6 +51,7 @@ export const CentralLeadBankView: React.FC<CentralLeadBankViewProps> = ({
   const [targetClientId, setTargetClientId] = useState<string>('');
   const [editingLead, setEditingLead] = useState<Lead | null>(null);
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [isSyncingSheets, setIsSyncingSheets] = useState<boolean>(false);
   const { toast } = useToast();
 
   const fetchLeads = async () => {
@@ -157,19 +160,29 @@ export const CentralLeadBankView: React.FC<CentralLeadBankViewProps> = ({
     }
   };
 
-  const exportToCSV = () => {
-    if (leads.length === 0) return;
-    const headers = ['ID', 'Show Name', 'Host Name', 'Platform', 'Email', 'Subscribers', 'Niche', 'Tags', 'Client ID', 'Status', 'Location'];
-    const rows = leads.map((l) => [
+  const exportToCSV = (onlySelected = false) => {
+    const targetLeads = onlySelected && selectedLeadIds.length > 0
+      ? leads.filter((l) => selectedLeadIds.includes(l.id))
+      : leads;
+
+    if (targetLeads.length === 0) {
+      toast.warning('No leads available to export.');
+      return;
+    }
+
+    const headers = ['ID', 'Show Name', 'Host Name', 'Platform', 'Email', 'Email Type', 'Confidence', 'Subscribers', 'Niche', 'Tags', 'Client ID', 'Status', 'Location'];
+    const rows = targetLeads.map((l) => [
       l.id,
       `"${l.showName?.replace(/"/g, '""') || ''}"`,
       `"${l.hostName?.replace(/"/g, '""') || ''}"`,
       l.platform,
-      l.email,
+      l.email || '',
+      l.emailType || 'direct',
+      `${Math.round((l.emailConfidence ?? 1.0) * 100)}%`,
       l.subscribers,
       `"${l.niche || ''}"`,
       `"${(l.tags || []).join(', ')}"`,
-      l.clientId,
+      l.clientId || '',
       l.status,
       `"${l.location || ''}"`,
     ]);
@@ -178,10 +191,39 @@ export const CentralLeadBankView: React.FC<CentralLeadBankViewProps> = ({
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement('a');
     link.setAttribute('href', encodedUri);
-    link.setAttribute('download', `leads_export_${new Date().toISOString().slice(0, 10)}.csv`);
+    link.setAttribute('download', `leads_export_${onlySelected ? 'selected_' : ''}${new Date().toISOString().slice(0, 10)}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    toast.success(`Exported ${targetLeads.length} lead(s) to CSV`);
+  };
+
+  const handleSyncToSheets = async (onlySelected = false) => {
+    const targetLeads = onlySelected && selectedLeadIds.length > 0
+      ? leads.filter((l) => selectedLeadIds.includes(l.id))
+      : leads;
+
+    if (targetLeads.length === 0) {
+      toast.warning('No leads available to sync to Google Sheets.');
+      return;
+    }
+
+    setIsSyncingSheets(true);
+    try {
+      const { spreadsheetId } = await findOrCreateMasterSheet();
+      const res = await syncLeadsToMasterSheet(spreadsheetId, targetLeads);
+      toast.success(`Synchronized ${res.count} lead(s) to Google Sheets ('Podcast Leads' tab)!`);
+      setStatusMessage({
+        type: 'success',
+        text: `Successfully synced ${res.count} lead(s) to Master Google Sheet ('Podcast Leads' tab)!`,
+      });
+    } catch (err: any) {
+      const errText = err.message || 'Failed to sync leads to Google Sheets.';
+      toast.error(errText);
+      setStatusMessage({ type: 'error', text: errText });
+    } finally {
+      setIsSyncingSheets(false);
+    }
   };
 
   return (
@@ -200,18 +242,27 @@ export const CentralLeadBankView: React.FC<CentralLeadBankViewProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center space-x-3">
+        <div className="flex items-center space-x-3 flex-wrap gap-y-2">
           <button
-            onClick={exportToCSV}
-            disabled={leads.length === 0}
-            className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-xl border border-slate-700 flex items-center space-x-2 transition-colors disabled:opacity-50"
+            onClick={() => handleSyncToSheets(false)}
+            disabled={isSyncingSheets || leads.length === 0}
+            className="px-4 py-2 bg-emerald-950/40 hover:bg-emerald-900/60 text-emerald-300 text-xs font-semibold rounded-xl border border-emerald-800/80 flex items-center space-x-2 transition-colors disabled:opacity-50 cursor-pointer"
+            title="Sync all leads to 'Podcast Leads' sheet tab"
           >
-            <Download className="w-3.5 h-3.5" />
+            <FileSpreadsheet className={`w-3.5 h-3.5 ${isSyncingSheets ? 'animate-spin' : ''}`} />
+            <span>{isSyncingSheets ? 'Syncing...' : 'Sync to Sheets'}</span>
+          </button>
+          <button
+            onClick={() => exportToCSV(false)}
+            disabled={leads.length === 0}
+            className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-xl border border-slate-700 flex items-center space-x-2 transition-colors disabled:opacity-50 cursor-pointer"
+          >
+            <Download className="w-3.5 h-3.5 text-sky-400" />
             <span>Export CSV ({leads.length})</span>
           </button>
           <button
             onClick={fetchLeads}
-            className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl border border-slate-700 transition-colors"
+            className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl border border-slate-700 transition-colors cursor-pointer"
             title="Refresh Leads"
           >
             <RefreshCw className="w-4 h-4" />
@@ -353,7 +404,26 @@ export const CentralLeadBankView: React.FC<CentralLeadBankViewProps> = ({
               Selected <span className="text-white font-bold">{selectedLeadIds.length}</span> lead(s) for pipeline assignment
             </span>
 
-            <div className="flex items-center space-x-2 w-full md:w-auto">
+            <div className="flex items-center space-x-2 w-full md:w-auto flex-wrap gap-y-2">
+              <button
+                onClick={() => exportToCSV(true)}
+                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs rounded-xl flex items-center space-x-1.5 border border-slate-700 transition-all cursor-pointer"
+                title="Download selected leads to CSV"
+              >
+                <Download className="w-3.5 h-3.5 text-sky-400" />
+                <span>Export ({selectedLeadIds.length}) CSV</span>
+              </button>
+
+              <button
+                onClick={() => handleSyncToSheets(true)}
+                disabled={isSyncingSheets}
+                className="px-3 py-1.5 bg-emerald-950/60 hover:bg-emerald-900/80 text-emerald-300 font-semibold text-xs rounded-xl flex items-center space-x-1.5 border border-emerald-800/80 transition-all disabled:opacity-50 cursor-pointer"
+                title="Sync selected leads to Google Sheets tab"
+              >
+                <FileSpreadsheet className={`w-3.5 h-3.5 ${isSyncingSheets ? 'animate-spin' : ''}`} />
+                <span>Sync ({selectedLeadIds.length}) Sheets</span>
+              </button>
+
               <select
                 value={targetClientId}
                 onChange={(e) => setTargetClientId(e.target.value)}
@@ -369,7 +439,7 @@ export const CentralLeadBankView: React.FC<CentralLeadBankViewProps> = ({
 
               <button
                 onClick={handleAssignToClient}
-                className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs rounded-xl flex items-center space-x-1.5 shadow-md shadow-indigo-600/20 transition-all"
+                className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs rounded-xl flex items-center space-x-1.5 shadow-md shadow-indigo-600/20 transition-all cursor-pointer"
               >
                 <UserCheck className="w-3.5 h-3.5" />
                 <span>Assign to Client</span>
@@ -462,17 +532,41 @@ export const CentralLeadBankView: React.FC<CentralLeadBankViewProps> = ({
                       </td>
 
                       <td className="p-4">
-                        <div className="space-y-1">
+                        <div className="space-y-1.5">
                           <div className="font-medium text-slate-200">{lead.hostName || 'Unknown Host'}</div>
                           {lead.email ? (
-                            <div className="text-[11px] text-indigo-400 flex items-center gap-1">
-                              <Mail className="w-3 h-3" /> {lead.email}
+                            <div className="space-y-1">
+                              <div className="text-[11px] text-indigo-300 font-mono flex items-center gap-1">
+                                <Mail className="w-3 h-3 text-indigo-400" /> {lead.email}
+                              </div>
+                              <div className="flex items-center gap-1.5">
+                                {lead.emailType === 'inferred' ? (
+                                  <span
+                                    title="Inferred based on business hostname heuristic"
+                                    className="inline-flex items-center gap-1 font-mono text-[10px] text-amber-300 bg-amber-500/10 px-1.5 py-0.5 rounded border border-amber-500/20"
+                                  >
+                                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
+                                    Inferred {Math.round((lead.emailConfidence ?? 0.8) * 100)}%
+                                  </span>
+                                ) : lead.emailType === 'mailto' ? (
+                                  <span className="inline-flex items-center gap-1 font-mono text-[10px] text-sky-300 bg-sky-500/10 px-1.5 py-0.5 rounded border border-sky-500/20">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-sky-400"></span>
+                                    Mailto {Math.round((lead.emailConfidence ?? 0.92) * 100)}%
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 font-mono text-[10px] text-emerald-300 bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/20">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                                    Direct {Math.round((lead.emailConfidence ?? 1.0) * 100)}%
+                                  </span>
+                                )}
+                              </div>
                             </div>
                           ) : (
                             <span className="text-[11px] text-slate-500">No email</span>
                           )}
                         </div>
                       </td>
+
 
                       <td className="p-4">
                         <div className="space-y-1">

@@ -39,10 +39,11 @@ export const LeadStagingPanel: React.FC<LeadStagingPanelProps> = ({
   const [editingLead, setEditingLead] = useState<StagedLead | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [filterNiche, setFilterNiche] = useState<string>('ALL');
+  const [filterEmailType, setFilterEmailType] = useState<string>('ALL');
   const [importing, setImporting] = useState(false);
   const [actionMessage, setActionMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
-  // Filter leads based on active client or local query
+  // Filter leads based on active client, local query, niche, and email verification status
   const filteredLeads = stagedLeads.filter((lead) => {
     const matchesClient = !activeClient || lead.clientId === activeClient.id || activeClient.id === 'ALL';
     const matchesSearch =
@@ -53,8 +54,15 @@ export const LeadStagingPanel: React.FC<LeadStagingPanelProps> = ({
       (lead.tags && lead.tags.some((t) => t.toLowerCase().includes(searchQuery.toLowerCase())));
     const matchesNiche = filterNiche === 'ALL' || lead.niche.toLowerCase() === filterNiche.toLowerCase();
 
-    return matchesClient && matchesSearch && matchesNiche;
+    let matchesEmailType = true;
+    if (filterEmailType === 'direct') matchesEmailType = lead.emailType === 'direct';
+    else if (filterEmailType === 'mailto') matchesEmailType = lead.emailType === 'mailto';
+    else if (filterEmailType === 'inferred') matchesEmailType = lead.emailType === 'inferred';
+    else if (filterEmailType === 'missing') matchesEmailType = !lead.email;
+
+    return matchesClient && matchesSearch && matchesNiche && matchesEmailType;
   });
+
 
   const allSelected = filteredLeads.length > 0 && filteredLeads.every((l) => selectedIds.includes(l.id));
 
@@ -268,7 +276,20 @@ export const LeadStagingPanel: React.FC<LeadStagingPanelProps> = ({
               </option>
             ))}
           </select>
+
+          <select
+            value={filterEmailType}
+            onChange={(e) => setFilterEmailType(e.target.value)}
+            className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-indigo-500"
+          >
+            <option value="ALL">All Emails</option>
+            <option value="direct">Direct Verified</option>
+            <option value="mailto">Mailto Link</option>
+            <option value="inferred">Inferred (Review)</option>
+            <option value="missing">Missing Email</option>
+          </select>
         </div>
+
 
         {/* Right: Approval Gate Action */}
         <div className="w-full md:w-auto flex justify-end">
@@ -375,17 +396,42 @@ export const LeadStagingPanel: React.FC<LeadStagingPanelProps> = ({
                       </td>
 
                       <td className="p-4">
-                        <div className="space-y-1">
+                        <div className="space-y-1.5">
                           <div className="font-medium text-slate-200">{lead.hostName || 'Host Unknown'}</div>
                           {lead.email ? (
-                            <div className="text-[11px] text-indigo-400 flex items-center gap-1">
-                              <Mail className="w-3 h-3" /> {lead.email}
+                            <div className="space-y-1">
+                              <div className="text-[11px] text-indigo-300 font-mono flex items-center gap-1">
+                                <Mail className="w-3 h-3 text-indigo-400" /> {lead.email}
+                              </div>
+                              <div className="flex items-center gap-1.5">
+                                {lead.emailType === 'inferred' ? (
+                                  <span
+                                    title="Inferred based on business hostname heuristic. Verify domain before outreach."
+                                    className="inline-flex items-center gap-1 font-mono text-[10px] text-amber-300 bg-amber-500/10 px-1.5 py-0.5 rounded border border-amber-500/20"
+                                  >
+                                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span>
+                                    Inferred {Math.round((lead.emailConfidence ?? 0.8) * 100)}%
+                                    <span className="text-[9px] text-amber-400 font-sans uppercase font-bold tracking-tight ml-0.5">Review</span>
+                                  </span>
+                                ) : lead.emailType === 'mailto' ? (
+                                  <span className="inline-flex items-center gap-1 font-mono text-[10px] text-sky-300 bg-sky-500/10 px-1.5 py-0.5 rounded border border-sky-500/20">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-sky-400"></span>
+                                    Mailto {Math.round((lead.emailConfidence ?? 0.92) * 100)}%
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 font-mono text-[10px] text-emerald-300 bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/20">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                                    Direct {Math.round((lead.emailConfidence ?? 1.0) * 100)}%
+                                  </span>
+                                )}
+                              </div>
                             </div>
                           ) : (
                             <span className="text-[11px] text-amber-400/80">No email found</span>
                           )}
                         </div>
                       </td>
+
 
                       <td className="p-4">
                         <div className="space-y-1">

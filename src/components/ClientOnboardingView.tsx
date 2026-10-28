@@ -204,9 +204,13 @@ Agency: "Deal confirmed! We are archiving this agreement and provisioning your d
       logStep(`Scheduled ${scheduledMilestones.length} milestone deadlines on Google Calendar.`);
 
       logStep('Updating Master Database (Client_Database_PodConnect_Master) in Google Sheets...');
-      const sheet = await findOrCreateMasterSheet();
-      await syncClientToMasterSheet(sheet.spreadsheetId, newClient);
-      logStep('Master Google Sheet synchronized with live document hyperlinks.');
+      try {
+        const sheet = await findOrCreateMasterSheet();
+        await syncClientToMasterSheet(sheet.spreadsheetId, newClient);
+        logStep('Master Google Sheet synchronized with live document hyperlinks.');
+      } catch (sheetErr: any) {
+        logStep(`Master Sheet sync notice: ${sheetErr.message}`);
+      }
 
       onClientAdded(newClient);
       setCompletedClient(newClient);

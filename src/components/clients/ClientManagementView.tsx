@@ -199,6 +199,57 @@ export const ClientManagementView: React.FC<ClientManagementViewProps> = ({
     );
   };
 
+  // Export Client Scope & Requirements to Google Doc
+  const handleExportScopeDoc = async (client: Client) => {
+    if (!isAuthenticated) {
+      onSignIn();
+      return;
+    }
+
+    setIsProcessingAction(true);
+    try {
+      const docRes = await createClientRequirementsDoc(client.name, {
+        id: client.id,
+        name: client.name,
+        niche: client.niche,
+        platform: client.platform,
+        minSubscribers: client.minSubscribers,
+        messagePillars: client.messagePillars,
+        credibilityAssets: client.credibilityAssets,
+        samplePitchAngle: client.samplePitchAngle,
+      });
+
+      const updatedClient: Client = {
+        ...client,
+        docs: {
+          ...client.docs,
+          requirementsDocUrl: docRes.documentUrl,
+          requirementsDocTitle: docRes.title,
+        },
+      };
+
+      onClientUpdated(updatedClient);
+      if (selectedDrawerClient?.id === client.id) {
+        setSelectedDrawerClient(updatedClient);
+      }
+
+      // Sync to Master Sheet if available
+      try {
+        const sheet = await findOrCreateMasterSheet();
+        await updateClientInMasterSheet(sheet.spreadsheetId, updatedClient);
+      } catch (sheetErr) {
+        console.warn('Master sheet sync notice:', sheetErr);
+      }
+
+      setFeedbackMessage(`Successfully exported Client Scope: "${docRes.title}" directly to Google Docs!`);
+    } catch (err: any) {
+      console.error('Scope export failed:', err);
+      setFeedbackMessage(`Failed to export Client Scope: ${err.message}`);
+    } finally {
+      setIsProcessingAction(false);
+    }
+  };
+
   return (
     <div className="max-w-7xl mx-auto space-y-6">
       {/* Top Banner & Title Area */}
@@ -341,6 +392,7 @@ export const ClientManagementView: React.FC<ClientManagementViewProps> = ({
         onTogglePause={handleTogglePause}
         onNavigateToScraper={onNavigateToScraper}
         onNavigateToOutreach={onNavigateToOutreach}
+        onExportScopeDoc={handleExportScopeDoc}
       />
 
       {/* Formal Order Cancellation Modal */}

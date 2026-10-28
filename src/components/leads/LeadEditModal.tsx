@@ -21,6 +21,8 @@ export const LeadEditModal: React.FC<LeadEditModalProps> = ({
     showName: lead.showName || '',
     hostName: lead.hostName || '',
     email: lead.email || '',
+    emailType: (lead.emailType || 'direct') as 'direct' | 'mailto' | 'inferred',
+    emailConfidence: Math.round((lead.emailConfidence ?? 1.0) * 100),
     platform: lead.platform || 'Podcast',
     showUrl: lead.showUrl || '',
     subscribers: lead.subscribers || 0,
@@ -32,6 +34,49 @@ export const LeadEditModal: React.FC<LeadEditModalProps> = ({
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [domainCheckResult, setDomainCheckResult] = useState<{ valid: boolean; message: string } | null>(null);
+  const [checkingDomain, setCheckingDomain] = useState(false);
+
+  const handleValidateDomain = async () => {
+    if (!formData.email || !formData.email.includes('@')) {
+      setDomainCheckResult({ valid: false, message: 'Please enter a valid email address with @' });
+      return;
+    }
+    const domain = formData.email.split('@')[1]?.toLowerCase().trim();
+    if (!domain || !domain.includes('.')) {
+      setDomainCheckResult({ valid: false, message: 'Email domain has invalid format' });
+      return;
+    }
+
+    setCheckingDomain(true);
+    setDomainCheckResult(null);
+
+    // Call server on-demand email discovery/domain check endpoint
+    try {
+      const res = await fetch('/api/leads/discover-emails', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: `https://${domain}`, hostName: formData.hostName }),
+      });
+      const data = await res.json();
+      if (res.ok && data.discovery) {
+        const found = data.discovery.candidates?.find((c: any) => c.email.endsWith(`@${domain}`));
+        if (found && found.domain_valid) {
+          setDomainCheckResult({ valid: true, message: `Domain ${domain} is legitimate (${found.validation_reason})` });
+        } else if (found && !found.domain_valid) {
+          setDomainCheckResult({ valid: false, message: `Warning: ${found.validation_reason}` });
+        } else {
+          setDomainCheckResult({ valid: true, message: `Domain syntax valid (${domain})` });
+        }
+      } else {
+        setDomainCheckResult({ valid: true, message: `Domain syntax valid (${domain})` });
+      }
+    } catch {
+      setDomainCheckResult({ valid: true, message: `Domain syntax check passed (${domain})` });
+    } finally {
+      setCheckingDomain(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -47,6 +92,8 @@ export const LeadEditModal: React.FC<LeadEditModalProps> = ({
         ...formData,
         tags: parsedTags,
         subscribers: Number(formData.subscribers),
+        emailType: formData.emailType,
+        emailConfidence: Math.max(0.1, Math.min(1.0, formData.emailConfidence / 100)),
       });
       onClose();
     } catch (err: any) {
@@ -55,6 +102,7 @@ export const LeadEditModal: React.FC<LeadEditModalProps> = ({
       setSaving(false);
     }
   };
+
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fade-in">
@@ -115,17 +163,69 @@ export const LeadEditModal: React.FC<LeadEditModalProps> = ({
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1 flex items-center gap-1.5">
-                <Mail className="w-3.5 h-3.5 text-slate-400" /> Contact Email
-              </label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                  <Mail className="w-3.5 h-3.5 text-slate-400" /> Contact Email
+                </label>
+                {formData.email && (
+                  <button
+                    type="button"
+                    onClick={handleValidateDomain}
+                    disabled={checkingDomain}
+                    className="text-[11px] text-indigo-400 hover:text-indigo-300 font-medium underline"
+                  >
+                    {checkingDomain ? 'Validating...' : 'Verify Domain'}
+                  </button>
+                )}
+              </div>
               <input
                 type="email"
                 value={formData.email}
-                onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                onChange={(e) => {
+                  setFormData({ ...formData, email: e.target.value });
+                  setDomainCheckResult(null);
+                }}
                 placeholder="contact@show.com"
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-100 focus:outline-none focus:border-indigo-500 text-sm"
               />
+              {domainCheckResult && (
+                <p className={`text-[11px] mt-1 ${domainCheckResult.valid ? 'text-emerald-400' : 'text-amber-400'}`}>
+                  {domainCheckResult.valid ? '✓ ' : '⚠ '} {domainCheckResult.message}
+                </p>
+              )}
             </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1">
+                Discovery Type & Confidence
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <select
+                  value={formData.emailType}
+                  onChange={(e) => setFormData({ ...formData, emailType: e.target.value as any })}
+                  className="bg-slate-950 border border-slate-800 rounded-xl px-2.5 py-2 text-slate-100 text-xs focus:outline-none focus:border-indigo-500"
+                >
+                  <option value="direct">Direct Verified</option>
+                  <option value="mailto">Mailto Link</option>
+                  <option value="inferred">Inferred Business</option>
+                </select>
+                <div className="flex items-center space-x-1.5 bg-slate-950 border border-slate-800 rounded-xl px-2 py-1">
+                  <input
+                    type="range"
+                    min="10"
+                    max="100"
+                    step="5"
+                    value={formData.emailConfidence}
+                    onChange={(e) => setFormData({ ...formData, emailConfidence: Number(e.target.value) })}
+                    className="w-full accent-indigo-500 cursor-pointer"
+                  />
+                  <span className="font-mono text-xs text-indigo-400 font-semibold w-9 text-right">
+                    {formData.emailConfidence}%
+                  </span>
+                </div>
+              </div>
+            </div>
+
 
             <div>
               <label className="block text-xs font-semibold text-slate-300 mb-1 flex items-center gap-1.5">

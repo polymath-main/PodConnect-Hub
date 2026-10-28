@@ -15,6 +15,8 @@ import sqlite3
 import argparse
 import urllib.request
 import urllib.parse
+import socket
+from html import unescape
 from html.parser import HTMLParser
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
@@ -90,6 +92,199 @@ class ContactLinkExtractor(HTMLParser):
                         self.form_links.append(full_url)
             except Exception:
                 pass
+
+
+class EmailDiscovery:
+    """Dedicated module for extracting mailto: links, advanced de-obfuscation regex, business email guessing, and domain validation."""
+
+    IGNORED_DOMAINS = [
+        'sentry.io', 'w3.org', 'schema.org', 'example.com', 'itunes.apple.com',
+        'cloudflare.com', 'wp.com', 'wordpress.org', 'gravatar.com', 'googleapis.com',
+        'github.com', 'medium.com', 'wixpress.com'
+    ]
+
+    HOSTING_DOMAINS = [
+        'anchor.fm', 'buzzsprout.com', 'simplecast.com', 'podbean.com',
+        'transistor.fm', 'megaphone.fm', 'libsyn.com', 'captivate.fm',
+        'redcircle.com', 'spreaker.com', 'rss.com', 'apple.com', 'spotify.com'
+    ]
+
+    @classmethod
+    def deobfuscate_text(cls, text):
+        if not text:
+            return ""
+        cleaned = unescape(text)
+        cleaned = re.sub(r'\[at\]|\(at\)|\[@\]|\(@\)', '@', cleaned, flags=re.I)
+        cleaned = re.sub(r'\[dot\]|\(dot\)', '.', cleaned, flags=re.I)
+        cleaned = re.sub(r'&#64;|&#x40;|%40', '@', cleaned, flags=re.I)
+        return cleaned
+
+    @classmethod
+    def extract_mailto_links(cls, html_content):
+        """Scans for mailto: links, unescaping HTML entities and removing query params."""
+        if not html_content:
+            return []
+        found = []
+        raw_matches = re.findall(r'href=[\'"]mailto:([^\'" >]+)[\'"]', html_content, flags=re.I)
+        for m in raw_matches:
+            clean = unescape(m).split('?')[0].split('#')[0].strip()
+            clean = urllib.parse.unquote(clean)
+            if '@' in clean and '.' in clean.split('@')[-1]:
+                parts = clean.split('@')
+                if len(parts) == 2 and parts[0] and parts[1]:
+                    domain = parts[1].lower()
+                    if not any(ign in domain for ign in cls.IGNORED_DOMAINS):
+                        found.append(clean)
+        return list(dict.fromkeys(found))
+
+    @classmethod
+    def extract_regex_emails(cls, text, domain_hint=None):
+        """Extracts valid public contact emails using strict RFC-like pattern and de-obfuscation."""
+        if not text:
+            return []
+        cleaned = cls.deobfuscate_text(text)
+        email_pattern = r'\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b'
+        matches = re.findall(email_pattern, cleaned)
+        filtered = []
+
+        for e in set(matches):
+            e_lower = e.lower()
+            if any(ext in e_lower for ext in ['.png', '.jpg', '.webp', '.gif', '.svg', '.css', '.js']):
+                continue
+            if any(ign in e_lower for ign in cls.IGNORED_DOMAINS):
+                continue
+            if len(e) > 6 and '.' in e.split('@')[-1]:
+                filtered.append(e)
+
+        # Prioritize domain match, then booking/guest/press prefixes over generic prefixes
+        domain_clean = domain_hint.lower().replace('www.', '').split('/')[0] if domain_hint else ""
+
+        def email_priority(em):
+            score = 10
+            em_l = em.lower()
+            if domain_clean and domain_clean in em_l:
+                score -= 5
+            prefix = em_l.split('@')[0]
+            if any(p in prefix for p in ['booking', 'guest', 'pitch', 'press', 'host']):
+                score -= 3
+            elif any(p in prefix for p in ['contact', 'hello', 'info']):
+                score -= 1
+            return score
+
+        filtered.sort(key=email_priority)
+        return filtered
+
+    @classmethod
+    def guess_business_emails(cls, hostname):
+        """Heuristic to guess potential business emails based on hostnames found on the page."""
+        if not hostname:
+            return []
+        clean_host = hostname.lower().strip()
+        if '://' in clean_host:
+            clean_host = urllib.parse.urlparse(clean_host).netloc
+        clean_host = clean_host.replace('www.', '').split(':')[0].split('/')[0]
+        if not clean_host or '.' not in clean_host or any(ign in clean_host for ign in cls.IGNORED_DOMAINS + cls.HOSTING_DOMAINS):
+            return []
+
+        guesses = []
+        prefixes = ['booking', 'contact', 'hello', 'info', 'press', 'team']
+        for p in prefixes:
+            guesses.append({
+                "email": f"{p}@{clean_host}",
+                "type": "inferred",
+                "confidence": 0.65,
+                "domainValid": True,
+                "validationReason": f"Inferred from show domain {clean_host}"
+            })
+        return guesses
+
+    @classmethod
+    def validate_domain_legitimacy(cls, domain_or_email):
+        """Checks if the domain is syntactically valid and likely legitimate via DNS resolution."""
+        domain = domain_or_email.split('@')[-1] if '@' in domain_or_email else domain_or_email
+        domain = domain.lower().strip()
+
+        # Syntax check
+        if not domain or '.' not in domain or len(domain.split('.')[-1]) < 2:
+            return False, "Invalid domain format"
+        if any(ign in domain for ign in cls.IGNORED_DOMAINS):
+            return False, "Domain in ignored blocklist"
+
+        # DNS reachability check
+        try:
+            socket.setdefaulttimeout(2.0)
+            socket.getaddrinfo(domain, None)
+            return True, "Domain resolved via DNS"
+        except Exception:
+            return False, "Domain does not resolve via DNS"
+
+    @classmethod
+    def discover_emails_for_url(cls, url, host_name=None):
+        """Enhances scrape_url to robustly search for emails, scan mailto, apply regex, guess business emails, and validate."""
+        scraper = PodcastLeadScraper()
+        html, _ = scraper.fetch_url(url, timeout=7)
+        if not html:
+            return {
+                "url": url,
+                "primary": "",
+                "emails": [],
+                "error": "Failed to fetch URL"
+            }
+
+        domain_hint = urllib.parse.urlparse(url).netloc or ""
+        discovered = []
+        seen = set()
+
+        # 1. Mailto links (Highest confidence direct contacts)
+        mailto_emails = cls.extract_mailto_links(html)
+        for em in mailto_emails:
+            if em.lower() not in seen:
+                seen.add(em.lower())
+                valid, reason = cls.validate_domain_legitimacy(em)
+                discovered.append({
+                    "email": em,
+                    "type": "mailto",
+                    "confidence": 0.95 if valid else 0.70,
+                    "domainValid": valid,
+                    "validationReason": reason
+                })
+
+        # 2. Text Regex emails
+        regex_emails = cls.extract_regex_emails(html, domain_hint=domain_hint)
+        for em in regex_emails:
+            if em.lower() not in seen:
+                seen.add(em.lower())
+                valid, reason = cls.validate_domain_legitimacy(em)
+                discovered.append({
+                    "email": em,
+                    "type": "direct",
+                    "confidence": 0.90 if valid else 0.65,
+                    "domainValid": valid,
+                    "validationReason": reason
+                })
+
+        # 3. If no direct emails found, guess business emails from hostname
+        if not discovered and domain_hint:
+            guesses = cls.guess_business_emails(domain_hint)
+            valid, reason = cls.validate_domain_legitimacy(domain_hint)
+            for g in guesses:
+                g["domainValid"] = valid
+                g["validationReason"] = reason
+                discovered.append(g)
+
+        primary = ""
+        for d in discovered:
+            if d.get("domainValid") and not scraper.is_generic_or_hosting_email(d["email"]):
+                primary = d["email"]
+                break
+        if not primary and discovered:
+            primary = discovered[0]["email"]
+
+        return {
+            "url": url,
+            "primary": primary,
+            "emails": discovered
+        }
 
 
 def generate_lead_tags(niche, platform, subs=2500, host_name="Show Host", is_active=True, website_enriched=False):
@@ -251,11 +446,14 @@ class PodcastLeadScraper:
                 show_url TEXT,
                 feed_url TEXT,
                 email TEXT,
+                email_type TEXT DEFAULT 'direct',
+                email_confidence REAL DEFAULT 1.0,
                 subscribers INTEGER,
                 niche TEXT,
                 tags TEXT,
                 score REAL,
                 location TEXT,
+                notes TEXT,
                 date_scraped TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(client_id, show_name)
             )
@@ -273,6 +471,8 @@ class PodcastLeadScraper:
                 show_url TEXT,
                 feed_url TEXT,
                 email TEXT,
+                email_type TEXT DEFAULT 'direct',
+                email_confidence REAL DEFAULT 1.0,
                 subscribers INTEGER,
                 niche TEXT,
                 score REAL,
@@ -284,46 +484,41 @@ class PodcastLeadScraper:
                 UNIQUE(client_id, show_name)
             )
         ''')
+
+        # Run SQLite column migrations if existing tables lack columns
+        try:
+            cursor.execute("PRAGMA table_info(staged_leads)")
+            staged_cols = [c[1] for c in cursor.fetchall()]
+            if 'email_type' not in staged_cols:
+                cursor.execute("ALTER TABLE staged_leads ADD COLUMN email_type TEXT DEFAULT 'direct'")
+            if 'email_confidence' not in staged_cols:
+                cursor.execute("ALTER TABLE staged_leads ADD COLUMN email_confidence REAL DEFAULT 1.0")
+            if 'notes' not in staged_cols:
+                cursor.execute("ALTER TABLE staged_leads ADD COLUMN notes TEXT")
+            if 'tenant_id' not in staged_cols:
+                cursor.execute("ALTER TABLE staged_leads ADD COLUMN tenant_id TEXT DEFAULT 'tenant_default'")
+        except Exception:
+            pass
+
+        try:
+            cursor.execute("PRAGMA table_info(leads)")
+            lead_cols = [c[1] for c in cursor.fetchall()]
+            if 'email_type' not in lead_cols:
+                cursor.execute("ALTER TABLE leads ADD COLUMN email_type TEXT DEFAULT 'direct'")
+            if 'email_confidence' not in lead_cols:
+                cursor.execute("ALTER TABLE leads ADD COLUMN email_confidence REAL DEFAULT 1.0")
+            if 'notes' not in lead_cols:
+                cursor.execute("ALTER TABLE leads ADD COLUMN notes TEXT")
+            if 'tenant_id' not in lead_cols:
+                cursor.execute("ALTER TABLE leads ADD COLUMN tenant_id TEXT DEFAULT 'tenant_default'")
+        except Exception:
+            pass
+
         self.conn.commit()
 
     def extract_emails_from_text(self, text, domain_hint=None):
-        """Extracts valid public contact emails using strict RFC-like pattern, filtering assets & noise"""
-        # Strict pattern: local@domain.tld (minimum 2-letter TLD, rejects npm packages like lodash@4.18)
-        email_pattern = r'\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b'
-        matches = re.findall(email_pattern, text)
-        filtered = []
-        ignored_domains = [
-            'sentry.io', 'w3.org', 'schema.org', 'example.com', 'itunes.apple.com',
-            'cloudflare.com', 'wp.com', 'wordpress.org', 'gravatar.com', 'googleapis.com',
-            'github.com', 'medium.com'
-        ]
-
-        for e in set(matches):
-            e_lower = e.lower()
-            if any(ext in e_lower for ext in ['.png', '.jpg', '.webp', '.gif', '.svg', '.css', '.js']):
-                continue
-            if any(ign in e_lower for ign in ignored_domains):
-                continue
-            if len(e) > 6 and '.' in e.split('@')[-1]:
-                filtered.append(e)
-
-        # Prioritize domain match, then booking/guest/press prefixes over generic prefixes
-        domain_clean = domain_hint.lower().replace('www.', '').split('/')[0] if domain_hint else ""
-
-        def email_priority(em):
-            score = 10
-            em_l = em.lower()
-            if domain_clean and domain_clean in em_l:
-                score -= 5
-            prefix = em_l.split('@')[0]
-            if any(p in prefix for p in ['booking', 'guest', 'pitch', 'press', 'host']):
-                score -= 3
-            elif any(p in prefix for p in ['contact', 'hello', 'info']):
-                score -= 1
-            return score
-
-        filtered.sort(key=email_priority)
-        return filtered
+        """Extracts valid public contact emails using EmailDiscovery engine"""
+        return EmailDiscovery.extract_regex_emails(text, domain_hint=domain_hint)
 
     def is_generic_or_hosting_email(self, email):
         """Identifies generic hosting provider emails that do not reach the host directly"""
@@ -627,16 +822,19 @@ class PodcastLeadScraper:
         cursor.execute('''
             INSERT INTO staged_leads (
                 tenant_id, client_id, show_name, host_name, platform, show_url,
-                feed_url, email, subscribers, niche, tags, score, location
+                feed_url, email, email_type, email_confidence, subscribers, niche, tags, score, location, notes
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(client_id, show_name) DO UPDATE SET
                 tenant_id = excluded.tenant_id,
                 host_name = excluded.host_name,
                 email = CASE WHEN excluded.email != '' THEN excluded.email ELSE staged_leads.email END,
+                email_type = excluded.email_type,
+                email_confidence = excluded.email_confidence,
                 subscribers = max(staged_leads.subscribers, excluded.subscribers),
                 tags = excluded.tags,
-                score = excluded.score
+                score = excluded.score,
+                notes = CASE WHEN excluded.notes IS NOT NULL THEN excluded.notes ELSE staged_leads.notes END
         ''', (
             self.tenant_id,
             lead["client_id"],
@@ -646,11 +844,14 @@ class PodcastLeadScraper:
             lead["show_url"],
             lead.get("feed_url", ""),
             lead.get("email", ""),
+            lead.get("email_type", "direct"),
+            lead.get("email_confidence", 1.0),
             lead.get("subscribers", 2500),
             lead["niche"],
             tags_json,
             lead.get("score", 8.0),
-            lead.get("location", "Global / Remote")
+            lead.get("location", "Global / Remote"),
+            lead.get("notes")
         ))
         self.conn.commit()
         self.log(f"[STAGED] Scraped lead held in review area: {lead['show_name']} ({lead['platform']})", lead=lead)
@@ -663,13 +864,15 @@ class PodcastLeadScraper:
         cursor.execute('''
             INSERT INTO leads (
                 tenant_id, client_id, show_name, host_name, platform, show_url,
-                feed_url, email, subscribers, niche, score, status, tags, notes, location
+                feed_url, email, email_type, email_confidence, subscribers, niche, score, status, tags, notes, location
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Imported', ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Imported', ?, ?, ?)
             ON CONFLICT(client_id, show_name) DO UPDATE SET
                 tenant_id = excluded.tenant_id,
                 host_name = excluded.host_name,
                 email = CASE WHEN excluded.email != '' THEN excluded.email ELSE leads.email END,
+                email_type = excluded.email_type,
+                email_confidence = excluded.email_confidence,
                 subscribers = max(leads.subscribers, excluded.subscribers),
                 tags = excluded.tags,
                 score = excluded.score,
@@ -683,6 +886,8 @@ class PodcastLeadScraper:
             lead["show_url"],
             lead.get("feed_url", ""),
             lead.get("email", ""),
+            lead.get("email_type", "direct"),
+            lead.get("email_confidence", 1.0),
             lead.get("subscribers", 2500),
             lead["niche"],
             lead.get("score", 8.0),
@@ -697,13 +902,13 @@ class PodcastLeadScraper:
         cursor = self.conn.cursor()
         if client_id and client_id != "ALL":
             cursor.execute(
-                'SELECT id, client_id, show_name, host_name, platform, show_url, feed_url, email, subscribers, niche, tags, score, location, date_scraped '
+                'SELECT id, client_id, show_name, host_name, platform, show_url, feed_url, email, email_type, email_confidence, subscribers, niche, tags, score, location, notes, date_scraped '
                 'FROM staged_leads WHERE (tenant_id = ? OR tenant_id = "tenant_default") AND client_id = ? ORDER BY date_scraped DESC',
                 (self.tenant_id, client_id)
             )
         else:
             cursor.execute(
-                'SELECT id, client_id, show_name, host_name, platform, show_url, feed_url, email, subscribers, niche, tags, score, location, date_scraped '
+                'SELECT id, client_id, show_name, host_name, platform, show_url, feed_url, email, email_type, email_confidence, subscribers, niche, tags, score, location, notes, date_scraped '
                 'FROM staged_leads WHERE tenant_id = ? OR tenant_id = "tenant_default" ORDER BY date_scraped DESC',
                 (self.tenant_id,)
             )
@@ -712,9 +917,9 @@ class PodcastLeadScraper:
         for r in rows:
             tags = []
             try:
-                tags = json.loads(r[10]) if r[10] else []
+                tags = json.loads(r[12]) if r[12] else []
             except Exception:
-                tags = [t.strip() for t in (r[10] or "").split(',') if t.strip()]
+                tags = [t.strip() for t in (r[12] or "").split(',') if t.strip()]
 
             leads.append({
                 "id": r[0],
@@ -725,12 +930,15 @@ class PodcastLeadScraper:
                 "showUrl": r[5],
                 "feedUrl": r[6],
                 "email": r[7],
-                "subscribers": r[8],
-                "niche": r[9],
+                "emailType": r[8] or "direct",
+                "emailConfidence": r[9] if r[9] is not None else 1.0,
+                "subscribers": r[10],
+                "niche": r[11],
                 "tags": tags,
-                "score": r[11],
-                "location": r[12],
-                "dateScraped": r[13]
+                "score": r[13],
+                "location": r[14],
+                "notes": r[15],
+                "dateScraped": r[16]
             })
         return leads
 
@@ -857,13 +1065,18 @@ if __name__ == "__main__":
     parser.add_argument("--min-subs", type=int, default=1000, help="Minimum subscriber threshold")
     parser.add_argument("--limit", type=int, default=5, help="Lead count limit")
     parser.add_argument("--max-inactive-days", type=int, default=60, help="Max days since last episode (Liveness Gate)")
+    parser.add_argument("--discover-email", help="Discover and validate public contact emails from a target URL")
+    parser.add_argument("--scrape-url", help="Scrape podcast information from a direct URL")
     parser.add_argument("--dump-json", action="store_true", help="Print all approved leads as JSON")
     parser.add_argument("--dump-staged", action="store_true", help="Print all staged leads as JSON")
     parser.add_argument("--direct-import", action="store_true", help="Bypass staging and import directly")
     args = parser.parse_args()
 
     scraper = PodcastLeadScraper(tenant_id=args.tenant_id)
-    if args.dump_json:
+    if args.discover_email:
+        res = EmailDiscovery.discover_emails_for_url(args.discover_email)
+        print(json.dumps(res))
+    elif args.dump_json:
         print(json.dumps(scraper.get_leads(args.client)))
     elif args.dump_staged:
         print(json.dumps(scraper.get_staged_leads(args.client)))
