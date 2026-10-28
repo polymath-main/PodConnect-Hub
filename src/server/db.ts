@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import fs from 'node:fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import {
@@ -17,9 +18,28 @@ import {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const DB_PATH = process.env.DATABASE_PATH
-  ? path.resolve(process.env.DATABASE_PATH)
-  : path.resolve(__dirname, '../../podconnect_leads.db');
+
+export function resolveDatabasePath(): string {
+  if (process.env.DATABASE_PATH) {
+    return path.resolve(process.env.DATABASE_PATH);
+  }
+  // On Vercel / serverless edge runtimes, only /tmp is writable
+  if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) {
+    const tmpDb = path.join('/tmp', 'podconnect_leads.db');
+    const localDb = path.resolve(__dirname, '../../podconnect_leads.db');
+    if (!fs.existsSync(tmpDb) && fs.existsSync(localDb)) {
+      try {
+        fs.copyFileSync(localDb, tmpDb);
+      } catch (e) {
+        console.warn('[DB] Failed to seed /tmp database from repo template:', e);
+      }
+    }
+    return tmpDb;
+  }
+  return path.resolve(__dirname, '../../podconnect_leads.db');
+}
+
+const DB_PATH = resolveDatabasePath();
 
 export class DatabaseService {
   private db: DatabaseSync;
@@ -30,7 +50,11 @@ export class DatabaseService {
   }
 
   private init() {
-    this.db.exec('PRAGMA journal_mode = WAL;');
+    try {
+      this.db.exec('PRAGMA journal_mode = WAL;');
+    } catch {
+      try { this.db.exec('PRAGMA journal_mode = DELETE;'); } catch {}
+    }
 
     // 1. Tenants table
     this.db.exec(`
