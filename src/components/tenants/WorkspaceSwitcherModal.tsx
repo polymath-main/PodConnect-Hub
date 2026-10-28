@@ -13,6 +13,13 @@ import {
   AlertCircle,
   CreditCard,
   Zap,
+  Key,
+  Copy,
+  RotateCw,
+  Cpu,
+  Eye,
+  EyeOff,
+  Terminal,
 } from 'lucide-react';
 import { Tenant, TenantMember, UserRole } from '../../types';
 import { api } from '../../lib/api';
@@ -34,11 +41,21 @@ export const WorkspaceSwitcherModal: React.FC<WorkspaceSwitcherModalProps> = ({
   tenants,
   onTenantsUpdated,
 }) => {
-  const [activeTab, setActiveTab] = useState<'switch' | 'new' | 'team' | 'plan'>('switch');
+  const [activeTab, setActiveTab] = useState<'switch' | 'new' | 'team' | 'plan' | 'agent'>('switch');
   const [members, setMembers] = useState<TenantMember[]>([]);
   const [isLoadingMembers, setIsLoadingMembers] = useState(false);
   const [billingStatus, setBillingStatus] = useState<any>(null);
   const [isLoadingBilling, setIsLoadingBilling] = useState(false);
+
+  // Agent Key state
+  const [agentKeyData, setAgentKeyData] = useState<any>(null);
+  const [isLoadingAgentKey, setIsLoadingAgentKey] = useState(false);
+  const [isRotatingAgentKey, setIsRotatingAgentKey] = useState(false);
+  const [showAgentKey, setShowAgentKey] = useState(false);
+  const [copiedAgentKey, setCopiedAgentKey] = useState(false);
+  const [confirmRotateKey, setConfirmRotateKey] = useState(false);
+  const [mcpClientChoice, setMcpClientChoice] = useState<'antigravity' | 'claude' | 'cursor'>('antigravity');
+  const [copiedMcpSnippet, setCopiedMcpSnippet] = useState(false);
 
   // New Workspace form state
   const [newWorkspaceName, setNewWorkspaceName] = useState('');
@@ -59,7 +76,119 @@ export const WorkspaceSwitcherModal: React.FC<WorkspaceSwitcherModalProps> = ({
     if (isOpen && activeTenant && activeTab === 'plan') {
       loadBillingStatus();
     }
+    if (isOpen && activeTab === 'agent') {
+      loadAgentKey();
+    }
   }, [isOpen, activeTenant, activeTab]);
+
+  const loadAgentKey = async () => {
+    setIsLoadingAgentKey(true);
+    try {
+      const res = await api.getUserAgentKey();
+      if (res.success) {
+        setAgentKeyData(res);
+      }
+    } catch (err: any) {
+      console.error('Failed to load agent key:', err);
+    } finally {
+      setIsLoadingAgentKey(false);
+    }
+  };
+
+  const handleRotateAgentKey = async () => {
+    setIsRotatingAgentKey(true);
+    try {
+      const res = await api.rotateUserAgentKey();
+      if (res.success) {
+        setAgentKeyData(res);
+        setConfirmRotateKey(false);
+        setStatusMessage({ text: 'Agent secret key rotated successfully. Previous key revoked.', type: 'success' });
+      }
+    } catch (err: any) {
+      setStatusMessage({ text: err.message || 'Failed to rotate agent key', type: 'error' });
+    } finally {
+      setIsRotatingAgentKey(false);
+    }
+  };
+
+  const handleCopyAgentKey = () => {
+    if (!agentKeyData?.key) return;
+    navigator.clipboard.writeText(agentKeyData.key);
+    setCopiedAgentKey(true);
+    setTimeout(() => setCopiedAgentKey(false), 2000);
+  };
+
+  const getMcpSnippet = () => {
+    const origin = typeof window !== 'undefined' ? window.location.origin : 'https://pod-connect-hub.vercel.app';
+    const key = agentKeyData?.key || 'pca_live_your_key_here';
+    const tenant = agentKeyData?.tenantId || activeTenant?.id || 'tenant_default';
+
+    if (mcpClientChoice === 'antigravity') {
+      return JSON.stringify(
+        {
+          mcpServers: {
+            'podconnect-hub': {
+              command: 'python3',
+              args: ['${workspaceFolder}/mcp/podconnect_mcp.py'],
+              env: {
+                PODCONNECT_URL: origin,
+                AGENT_SECRET_KEY: key,
+                PODCONNECT_TENANT_ID: tenant,
+              },
+            },
+          },
+        },
+        null,
+        2
+      );
+    }
+
+    if (mcpClientChoice === 'claude') {
+      return JSON.stringify(
+        {
+          mcpServers: {
+            podconnect: {
+              command: 'python3',
+              args: ['/ABSOLUTE/PATH/TO/PodConnect-Hub/mcp/podconnect_mcp.py'],
+              env: {
+                PODCONNECT_URL: origin,
+                AGENT_SECRET_KEY: key,
+                PODCONNECT_TENANT_ID: tenant,
+              },
+            },
+          },
+        },
+        null,
+        2
+      );
+    }
+
+    return JSON.stringify(
+      {
+        mcp: {
+          servers: {
+            podconnect: {
+              type: 'stdio',
+              command: 'python3',
+              args: ['./mcp/podconnect_mcp.py'],
+              env: {
+                PODCONNECT_URL: origin,
+                AGENT_SECRET_KEY: key,
+              },
+            },
+          },
+        },
+      },
+      null,
+      2
+    );
+  };
+
+  const handleCopyMcpSnippet = () => {
+    navigator.clipboard.writeText(getMcpSnippet());
+    setCopiedMcpSnippet(true);
+    setTimeout(() => setCopiedMcpSnippet(false), 2000);
+  };
 
   const loadBillingStatus = async () => {
     setIsLoadingBilling(true);
@@ -212,6 +341,17 @@ export const WorkspaceSwitcherModal: React.FC<WorkspaceSwitcherModalProps> = ({
           >
             <CreditCard className="w-3.5 h-3.5" />
             Plan & Quota
+          </button>
+          <button
+            onClick={() => { setActiveTab('agent'); setStatusMessage(null); }}
+            className={`pb-2.5 border-b-2 transition-colors flex items-center gap-1.5 ${
+              activeTab === 'agent'
+                ? 'border-indigo-500 text-indigo-400 font-semibold'
+                : 'border-transparent text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Key className="w-3.5 h-3.5" />
+            Agent Secret Keys
           </button>
         </div>
 
@@ -515,6 +655,158 @@ export const WorkspaceSwitcherModal: React.FC<WorkspaceSwitcherModalProps> = ({
                 >
                   Upgrade Subscription (Contact Support)
                 </button>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 5: AGENT SECRET KEYS & MCP ACCESS */}
+          {activeTab === 'agent' && (
+            <div className="space-y-4">
+              <div className="p-3.5 bg-indigo-500/10 border border-indigo-500/20 rounded-xl space-y-1.5">
+                <div className="flex items-center gap-2 text-indigo-300 font-semibold text-xs">
+                  <Sparkles className="w-4 h-4 text-indigo-400 shrink-0" />
+                  <span>Workspace-Scoped Autonomous Agent Credentials</span>
+                </div>
+                <p className="text-slate-400 text-[11px] leading-relaxed">
+                  Your personal agent secret key grants AI assistants (Antigravity CLI, OpenCode, Claude, Cursor) direct access to this workspace via the Model Context Protocol (MCP). Actions taken by agents are bound to your user role ({activeTenant?.currentRole || 'owner'}).
+                </p>
+              </div>
+
+              {/* Secret Key Card */}
+              <div className="bg-slate-950 border border-slate-800 rounded-xl p-3.5 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-slate-300 text-xs flex items-center gap-1.5">
+                    <Key className="w-3.5 h-3.5 text-amber-400" />
+                    Agent Secret Key
+                  </span>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700">
+                    {agentKeyData?.keyPrefix || 'pca_live_...'}
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2 bg-slate-900 border border-slate-800 rounded-lg p-2 font-mono text-xs">
+                  <div className="flex-1 truncate select-all text-slate-200">
+                    {isLoadingAgentKey ? (
+                      <span className="text-slate-500">Loading secret key...</span>
+                    ) : agentKeyData?.key ? (
+                      showAgentKey ? agentKeyData.key : `••••••••••••••••••••••••••••••••${agentKeyData.key.slice(-8)}`
+                    ) : (
+                      <span className="text-slate-500">No active key found</span>
+                    )}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowAgentKey(!showAgentKey)}
+                    className="p-1.5 text-slate-400 hover:text-slate-200 hover:bg-slate-800 rounded transition-colors cursor-pointer"
+                    title={showAgentKey ? 'Hide key' : 'Show full key'}
+                  >
+                    {showAgentKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleCopyAgentKey}
+                    disabled={!agentKeyData?.key}
+                    className="flex items-center gap-1 px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs font-semibold transition-colors cursor-pointer disabled:opacity-50 shrink-0"
+                  >
+                    {copiedAgentKey ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-emerald-300" />
+                        <span>Copied</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>Copy</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-[11px]">
+                  <span className="text-slate-500">
+                    Tenant: <strong className="text-slate-400 font-mono">{activeTenant?.name}</strong> ({activeTenant?.id})
+                  </span>
+
+                  {confirmRotateKey ? (
+                    <div className="flex items-center gap-2">
+                      <span className="text-rose-400 font-medium">Revoke old key?</span>
+                      <button
+                        type="button"
+                        onClick={handleRotateAgentKey}
+                        disabled={isRotatingAgentKey}
+                        className="px-2 py-0.5 bg-rose-600 hover:bg-rose-500 text-white rounded text-[11px] font-semibold cursor-pointer disabled:opacity-50"
+                      >
+                        {isRotatingAgentKey ? 'Rotating...' : 'Confirm'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmRotateKey(false)}
+                        className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-[11px] cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmRotateKey(true)}
+                      className="text-slate-400 hover:text-rose-400 flex items-center gap-1 transition-colors cursor-pointer"
+                    >
+                      <RotateCw className="w-3 h-3" />
+                      <span>Rotate Key</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* MCP Toolchain Configs */}
+              <div className="space-y-2.5 pt-1">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                    <Cpu className="w-3.5 h-3.5 text-indigo-400" />
+                    1-Click MCP Setup Configs
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2 bg-slate-950 p-1 rounded-lg border border-slate-800">
+                  {(['antigravity', 'claude', 'cursor'] as const).map((client) => (
+                    <button
+                      key={client}
+                      type="button"
+                      onClick={() => setMcpClientChoice(client)}
+                      className={`flex-1 py-1.5 text-center rounded-md font-medium capitalize transition-colors cursor-pointer text-xs ${
+                        mcpClientChoice === client
+                          ? 'bg-indigo-600 text-white shadow-sm'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      {client === 'antigravity' ? 'Antigravity / OpenCode' : client}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="relative bg-slate-950 border border-slate-800 rounded-xl p-3 font-mono text-[11px] overflow-x-auto text-slate-300">
+                  <button
+                    type="button"
+                    onClick={handleCopyMcpSnippet}
+                    className="absolute top-2.5 right-2.5 flex items-center gap-1 px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs transition-colors cursor-pointer"
+                  >
+                    {copiedMcpSnippet ? (
+                      <>
+                        <Check className="w-3 h-3 text-emerald-400" />
+                        <span>Copied</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3 h-3" />
+                        <span>Copy JSON</span>
+                      </>
+                    )}
+                  </button>
+                  <pre>{getMcpSnippet()}</pre>
+                </div>
               </div>
             </div>
           )}

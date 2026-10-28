@@ -56,13 +56,23 @@ export function validateAgentKey(key?: string, customAgentId?: string): {
  * Resolves user/agent identity, validates active sessions, and injects workspace context.
  */
 export function authMiddleware(req: AuthenticatedRequest, res: Response, next: NextFunction) {
-  // 1. Extract bearer token or custom session header
+  // 1. Extract bearer token, custom session header, x-agent-key, or query param
   const authHeader = req.headers.authorization;
   const sessionHeader = (req.headers['x-session-token'] as string) || '';
-  let token = sessionHeader;
+  const agentKeyHeader = (req.headers['x-agent-key'] as string) || '';
+  let token = sessionHeader || agentKeyHeader;
 
   if (!token && authHeader && authHeader.startsWith('Bearer ')) {
     token = authHeader.substring(7).trim();
+  }
+
+  // Support query params for SSE streams and media endpoints where headers cannot be set by browser
+  if (!token && req.query) {
+    token = (req.query.token as string) ||
+      (req.query.sessionToken as string) ||
+      (req.query.agentKey as string) ||
+      (req.query.key as string) ||
+      '';
   }
 
   // 2. If token present, check SQLite sessions table
@@ -83,8 +93,10 @@ export function authMiddleware(req: AuthenticatedRequest, res: Response, next: N
         isAgent: session.authType === 'agent_key',
       };
 
-      // Tenant override via header if permitted
-      const requestedTenant = (req.headers['x-tenant-id'] as string) || '';
+      // Tenant override via header or query if permitted
+      const requestedTenant = (req.headers['x-tenant-id'] as string) ||
+        (req.query?.tenantId as string) ||
+        '';
       if (requestedTenant && requestedTenant !== session.tenantId) {
         const role = dbService.getUserRoleInTenant(requestedTenant, session.userId, session.email);
         if (role) {
@@ -105,7 +117,10 @@ export function authMiddleware(req: AuthenticatedRequest, res: Response, next: N
     // Check direct agent key
     const agentCheck = validateAgentKey(token);
     if (agentCheck.valid) {
-      const tenantId = agentCheck.tenantId || (req.headers['x-tenant-id'] as string) || 'tenant_default';
+      const tenantId = agentCheck.tenantId ||
+        (req.headers['x-tenant-id'] as string) ||
+        (req.query?.tenantId as string) ||
+        'tenant_default';
       req.user = {
         uid: agentCheck.agentId,
         email: agentCheck.email || `${agentCheck.agentId}@podconnect.agent`,
@@ -143,7 +158,9 @@ export function authMiddleware(req: AuthenticatedRequest, res: Response, next: N
   }
 
   // 4. Resolve Active Tenant / Workspace
-  let tenantId = (req.headers['x-tenant-id'] as string) || '';
+  let tenantId = (req.headers['x-tenant-id'] as string) ||
+    (req.query?.tenantId as string) ||
+    '';
   if (!tenantId) {
     const tenants = dbService.getTenantsForUser(userId, userEmail);
     tenantId = tenants.length > 0 ? tenants[0].id : 'tenant_default';

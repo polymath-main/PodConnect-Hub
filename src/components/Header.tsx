@@ -16,6 +16,7 @@ interface HeaderProps {
   activeTenant?: Tenant | null;
   onOpenWorkspaceSwitcher?: () => void;
   onOpenAgentMcp?: () => void;
+  onOpenUserSpace?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -32,6 +33,7 @@ export const Header: React.FC<HeaderProps> = ({
   activeTenant,
   onOpenWorkspaceSwitcher,
   onOpenAgentMcp,
+  onOpenUserSpace,
 }) => {
   return (
     <header className="sticky top-0 z-40 w-full flex items-center justify-between gap-4 md:gap-8 px-4 sm:px-6 py-3 bg-slate-950/85 backdrop-blur-md border-b border-slate-800 min-h-[56px]">
@@ -70,16 +72,16 @@ export const Header: React.FC<HeaderProps> = ({
           </button>
         )}
 
-        {/* Agent MCP Gateway Trigger */}
+        {/* Agent MCP Gateway Trigger (Visible on mobile & desktop) */}
         {user && onOpenAgentMcp && (
           <button
             onClick={onOpenAgentMcp}
-            className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 transition-colors cursor-pointer"
-            title="Configure Autonomous Agent MCP Access"
+            className="inline-flex items-center gap-1.5 px-2 sm:px-2.5 py-1 rounded-lg text-xs font-medium bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 transition-colors cursor-pointer"
+            title="Configure Autonomous Agent MCP Access & Secret Keys"
           >
             <Cpu className="w-3.5 h-3.5 text-indigo-400" />
             <span className="hidden md:inline">Agent MCP</span>
-            <span className="md:hidden">MCP</span>
+            <span className="md:hidden text-[11px]">MCP</span>
           </button>
         )}
       </div>
@@ -149,7 +151,13 @@ export const Header: React.FC<HeaderProps> = ({
       <div className="flex items-center gap-2 sm:gap-3 shrink-0">
         {user ? (
           <div className="flex items-center gap-2 sm:gap-3">
-            <div className="hidden sm:flex items-center gap-2 px-2.5 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-xs text-slate-300">
+            {/* User Space Trigger (Accessible on all screen sizes) */}
+            <button
+              type="button"
+              onClick={onOpenUserSpace}
+              title="Open User Space: Profile, Tenant & Agent Secret Keys"
+              className="flex items-center gap-2 px-2 sm:px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 rounded-lg text-xs text-slate-300 transition-colors cursor-pointer min-h-[36px]"
+            >
               {user.photoURL ? (
                 <img
                   src={user.photoURL}
@@ -158,12 +166,13 @@ export const Header: React.FC<HeaderProps> = ({
                   referrerPolicy="no-referrer"
                 />
               ) : (
-                <UserIcon className="w-4 h-4 text-slate-400 shrink-0" />
+                <UserIcon className="w-4 h-4 text-indigo-400 shrink-0" />
               )}
-              <span className="font-medium text-slate-200 truncate max-w-[110px] md:max-w-[140px]">
+              <span className="font-medium text-slate-200 truncate max-w-[100px] sm:max-w-[120px] md:max-w-[140px] hidden xs:inline">
                 {user.displayName || user.email?.split('@')[0]}
               </span>
-            </div>
+              <ChevronDown className="w-3 h-3 text-slate-400 shrink-0 hidden sm:inline" />
+            </button>
 
             <button
               onClick={onSignOut}

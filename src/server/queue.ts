@@ -95,6 +95,14 @@ export class JobQueueManager {
     tenantClients.forEach((client) => {
       try { client.write(message); } catch {}
     });
+
+    // Multi-tenant fallback: Also notify tenant_default subscribers if job is under a specific workspace
+    if (job.tenantId !== 'tenant_default') {
+      const defaultClients = this.tenantSubscribers.get('tenant_default') || [];
+      defaultClients.forEach((client) => {
+        try { client.write(message); } catch {}
+      });
+    }
   }
 
   /**
@@ -200,55 +208,70 @@ export class JobQueueManager {
 
     this.activeWorkers.set(job.id, { process: py, job });
 
-    py.stdout.on('data', (data) => {
-      const lines = data.toString().split('\n');
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const parsed = JSON.parse(line.trim());
+    let stdoutBuffer = '';
+    const processStdoutLine = (lineStr: string) => {
+      const line = lineStr.trim();
+      if (!line) return;
+      try {
+        const parsed = JSON.parse(line);
 
-          // Track progress if reported
-          if (parsed.progress !== undefined) {
-            job.progress = Math.min(100, Math.max(job.progress, parsed.progress));
-            dbService.updateJob(job.id, { progress: job.progress });
-          }
+        // Track progress if reported
+        if (parsed.progress !== undefined) {
+          job.progress = Math.min(100, Math.max(job.progress, parsed.progress));
+          dbService.updateJob(job.id, { progress: job.progress });
+        }
 
-          // Track staged leads count if reported
-          if (parsed.lead) {
-            job.foundCount++;
-            job.stagedCount++;
-            dbService.updateJob(job.id, {
-              foundCount: job.foundCount,
-              stagedCount: job.stagedCount,
-            });
-          }
-
-          dbService.appendJobLog(job.id, parsed.level || 'INFO', parsed.message || '', parsed.lead);
-
-          this.broadcast(job, {
-            type: 'job_log',
-            jobId: job.id,
-            log: {
-              timestamp: parsed.timestamp || new Date().toISOString(),
-              level: parsed.level || 'INFO',
-              message: parsed.message || '',
-              lead: parsed.lead,
-            },
-            job,
-          });
-        } catch {
-          dbService.appendJobLog(job.id, 'RAW', line.trim());
-          this.broadcast(job, {
-            type: 'job_log',
-            jobId: job.id,
-            log: {
-              timestamp: new Date().toISOString(),
-              level: 'RAW',
-              message: line.trim(),
-            },
-            job,
+        // Track staged leads count if reported
+        if (parsed.lead) {
+          job.foundCount++;
+          job.stagedCount++;
+          dbService.updateJob(job.id, {
+            foundCount: job.foundCount,
+            stagedCount: job.stagedCount,
           });
         }
+
+        dbService.appendJobLog(job.id, parsed.level || 'INFO', parsed.message || '', parsed.lead);
+
+        this.broadcast(job, {
+          type: 'job_log',
+          jobId: job.id,
+          log: {
+            timestamp: parsed.timestamp || new Date().toISOString(),
+            level: parsed.level || 'INFO',
+            message: parsed.message || '',
+            lead: parsed.lead,
+          },
+          job,
+        });
+      } catch {
+        dbService.appendJobLog(job.id, 'RAW', line);
+        this.broadcast(job, {
+          type: 'job_log',
+          jobId: job.id,
+          log: {
+            timestamp: new Date().toISOString(),
+            level: 'RAW',
+            message: line,
+          },
+          job,
+        });
+      }
+    };
+
+    py.stdout.on('data', (data) => {
+      stdoutBuffer += data.toString();
+      const lines = stdoutBuffer.split('\n');
+      stdoutBuffer = lines.pop() || '';
+      for (const line of lines) {
+        processStdoutLine(line);
+      }
+    });
+
+    py.stdout.on('end', () => {
+      if (stdoutBuffer.trim()) {
+        processStdoutLine(stdoutBuffer);
+        stdoutBuffer = '';
       }
     });
 

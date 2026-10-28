@@ -87,14 +87,22 @@ export const ScraperConsoleView: React.FC<ScraperConsoleViewProps> = ({
   useEffect(() => {
     let reconnectTimer: any = null;
     let attempts = 0;
-    const maxAttempts = 5;
+    const maxAttempts = 10;
     let currentEventSource: EventSource | null = null;
     let isCleanedUp = false;
 
     const connectSSE = () => {
       if (isCleanedUp) return;
 
-      const eventSource = new EventSource('/api/scrape/stream');
+      const tenantId = api.getTenantId();
+      const token = api.getSessionToken();
+      const params = new URLSearchParams();
+      if (tenantId) params.set('tenantId', tenantId);
+      if (token) params.set('token', token);
+      if (selectedJobIdForLogs) params.set('jobId', selectedJobIdForLogs);
+
+      const streamUrl = `/api/scrape/stream?${params.toString()}`;
+      const eventSource = new EventSource(streamUrl);
       currentEventSource = eventSource;
 
       eventSource.onopen = () => {
@@ -107,7 +115,13 @@ export const ScraperConsoleView: React.FC<ScraperConsoleViewProps> = ({
           if (data.type === 'connected') return;
 
           // If job status updated or finished, refresh job queue and staged leads
-          if (data.type === 'job_queued' || data.type === 'job_started' || data.type === 'job_completed' || data.type === 'job_failed' || data.type === 'job_cancelled') {
+          if (
+            data.type === 'job_queued' ||
+            data.type === 'job_started' ||
+            data.type === 'job_completed' ||
+            data.type === 'job_failed' ||
+            data.type === 'job_cancelled'
+          ) {
             loadJobs();
             loadStagedLeads(activeClient?.id);
           }
@@ -121,7 +135,7 @@ export const ScraperConsoleView: React.FC<ScraperConsoleViewProps> = ({
 
           if (logItem) {
             setLogs((prev) => [
-              ...prev.slice(-150),
+              ...prev.slice(-200),
               {
                 timestamp: logItem.timestamp || new Date().toISOString(),
                 level: logItem.level || 'INFO',
@@ -143,7 +157,7 @@ export const ScraperConsoleView: React.FC<ScraperConsoleViewProps> = ({
         eventSource.close();
         if (!isCleanedUp && attempts < maxAttempts) {
           attempts++;
-          const delay = Math.min(attempts * 2500, 10000);
+          const delay = Math.min(attempts * 2000, 10000);
           console.warn(`SSE stream disconnected. Reconnecting in ${delay}ms (attempt ${attempts}/${maxAttempts})...`);
           reconnectTimer = setTimeout(connectSSE, delay);
         }
@@ -157,7 +171,33 @@ export const ScraperConsoleView: React.FC<ScraperConsoleViewProps> = ({
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (currentEventSource) currentEventSource.close();
     };
-  }, [activeClient?.id]);
+  }, [activeClient?.id, selectedJobIdForLogs]);
+
+  // Intelligent Realtime Polling Fallback when any job is active
+  useEffect(() => {
+    const hasActiveJobs = jobs.some((j) => j.status === 'running' || j.status === 'pending');
+    if (!hasActiveJobs && !isScraping) return;
+
+    const interval = setInterval(() => {
+      loadJobs();
+      loadStagedLeads(activeClient?.id);
+
+      if (selectedJobIdForLogs) {
+        api.getJobDetails(selectedJobIdForLogs).then((res) => {
+          if (res.success && res.logs && res.logs.length > 0) {
+            setLogs(res.logs.map((l) => ({
+              timestamp: l.timestamp,
+              level: l.level as any,
+              message: l.message,
+              lead: l.metadata,
+            })));
+          }
+        }).catch(() => {});
+      }
+    }, 2500);
+
+    return () => clearInterval(interval);
+  }, [jobs, isScraping, selectedJobIdForLogs, activeClient?.id]);
 
   useEffect(() => {
     terminalEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -201,6 +241,14 @@ export const ScraperConsoleView: React.FC<ScraperConsoleViewProps> = ({
 
   const handleStartPythonScraper = async () => {
     setIsScraping(true);
+    setActiveTab('console');
+    setLogs([
+      {
+        timestamp: new Date().toISOString(),
+        level: 'INFO',
+        message: `Dispatching SwarmScraper worker for "${nicheQuery}" (Audience Floor: ${minSubs}, Limit: ${targetCount})...`,
+      },
+    ]);
     try {
       const res = await api.enqueueScrapeJob({
         clientId: activeClient?.id || 'C001',
@@ -208,12 +256,28 @@ export const ScraperConsoleView: React.FC<ScraperConsoleViewProps> = ({
         minSubs,
         limit: targetCount,
       });
-      if (res.success) {
+      if (res.success && res.job) {
+        setSelectedJobIdForLogs(res.job.id);
+        setLogs((prev) => [
+          ...prev,
+          {
+            timestamp: new Date().toISOString(),
+            level: 'INFO',
+            message: `Job ${res.job.id} queued successfully. Streaming live telemetry...`,
+          },
+        ]);
         loadJobs();
         loadStagedLeads(activeClient?.id);
-        setActiveTab('queue');
       }
     } catch (err: any) {
+      setLogs((prev) => [
+        ...prev,
+        {
+          timestamp: new Date().toISOString(),
+          level: 'ERROR',
+          message: `Job dispatch failed: ${err.message}`,
+        },
+      ]);
       alert(`Error enqueuing scraper job: ${err.message}`);
     } finally {
       setIsScraping(false);
@@ -249,12 +313,42 @@ export const ScraperConsoleView: React.FC<ScraperConsoleViewProps> = ({
 
   const handleStartGoogleSearchGrounding = async () => {
     setIsDiscoveringGrounded(true);
+    setActiveTab('console');
+    setLogs((prev) => [
+      ...prev,
+      {
+        timestamp: new Date().toISOString(),
+        level: 'INFO',
+        message: `Initializing Google Search Grounding discovery for "${nicheQuery}" (Min Subs: ${minSubs})...`,
+      },
+      {
+        timestamp: new Date().toISOString(),
+        level: 'INFO',
+        message: `Querying real-time Google Search grounding index with contact extraction...`,
+      },
+    ]);
+
     try {
       const res = await api.discoverShows(nicheQuery, activeClient?.id || 'C001', minSubs);
       if (!res.success) throw new Error(res.error || 'Search grounding discovery failed');
+      setLogs((prev) => [
+        ...prev,
+        {
+          timestamp: new Date().toISOString(),
+          level: 'SUCCESS',
+          message: `Grounded discovery complete: Staged ${res.stagedCount || 'candidate'} shows into review pipeline.`,
+        },
+      ]);
       loadStagedLeads(activeClient?.id);
-      setActiveTab('staging');
     } catch (err: any) {
+      setLogs((prev) => [
+        ...prev,
+        {
+          timestamp: new Date().toISOString(),
+          level: 'ERROR',
+          message: `Google Search Grounding failed: ${err.message}`,
+        },
+      ]);
       alert(`Error during Google Search Grounding: ${err.message}`);
     } finally {
       setIsDiscoveringGrounded(false);

@@ -437,14 +437,25 @@ app.post('/api/scrape/jobs/:id/cancel', (req: AuthenticatedRequest, res: Respons
 // SSE stream for a specific job
 app.get('/api/scrape/jobs/:id/stream', (req: AuthenticatedRequest, res: Response) => {
   res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
 
   const jobId = req.params.id;
   jobQueue.subscribeJob(jobId, res);
 
+  // Keep-alive heartbeat every 15s to prevent proxy/browser timeouts
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(': keepalive\n\n');
+    } catch {
+      clearInterval(heartbeat);
+    }
+  }, 15000);
+
   req.on('close', () => {
+    clearInterval(heartbeat);
     jobQueue.unsubscribeJob(jobId, res);
   });
 });
@@ -452,14 +463,33 @@ app.get('/api/scrape/jobs/:id/stream', (req: AuthenticatedRequest, res: Response
 // General SSE stream for all workspace jobs (backward compatible with ScraperConsoleView)
 app.get('/api/scrape/stream', (req: AuthenticatedRequest, res: Response) => {
   res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
 
-  const tenantId = req.tenantId || 'tenant_default';
+  const tenantId = req.tenantId || (req.query.tenantId as string) || 'tenant_default';
+  const jobId = (req.query.jobId as string) || undefined;
+
   jobQueue.subscribeTenant(tenantId, res);
+  if (jobId) {
+    jobQueue.subscribeJob(jobId, res);
+  }
+
+  // Keep-alive heartbeat every 15s
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(': keepalive\n\n');
+    } catch {
+      clearInterval(heartbeat);
+    }
+  }, 15000);
 
   req.on('close', () => {
+    clearInterval(heartbeat);
+    if (jobId) {
+      jobQueue.unsubscribeJob(jobId, res);
+    }
     jobQueue.unsubscribeTenant(tenantId, res);
   });
 });

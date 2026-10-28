@@ -11,6 +11,7 @@ import { WorkspaceHubView } from './components/WorkspaceHubView';
 import { ConfirmationModal } from './components/ConfirmationModal';
 import { WorkspaceSwitcherModal } from './components/tenants/WorkspaceSwitcherModal';
 import { AgentMcpModal } from './components/tenants/AgentMcpModal';
+import { UserSpaceModal } from './components/tenants/UserSpaceModal';
 import { LandingPageView } from './components/LandingPageView';
 import { Client, Lead, WorkspaceAuthUser, Tenant } from './types';
 import { initAuth, googleSignIn, operatorSignIn, logout, fetchClientsFromFirestore, saveClientToFirestore } from './lib/firebase';
@@ -27,6 +28,7 @@ export default function App() {
   const [activeTenant, setActiveTenant] = useState<Tenant | null>(null);
   const [isWorkspaceModalOpen, setIsWorkspaceModalOpen] = useState<boolean>(false);
   const [isAgentMcpModalOpen, setIsAgentMcpModalOpen] = useState<boolean>(false);
+  const [isUserSpaceModalOpen, setIsUserSpaceModalOpen] = useState<boolean>(false);
 
   // Client records loaded dynamically from database / Firestore (no hardcoded test data)
   const [clients, setClients] = useState<Client[]>([]);
@@ -268,6 +270,7 @@ export default function App() {
         activeTenant={activeTenant}
         onOpenWorkspaceSwitcher={() => setIsWorkspaceModalOpen(true)}
         onOpenAgentMcp={() => setIsAgentMcpModalOpen(true)}
+        onOpenUserSpace={() => setIsUserSpaceModalOpen(true)}
       />
 
       {authError && (
@@ -475,6 +478,17 @@ export default function App() {
         isOpen={isAgentMcpModalOpen}
         onClose={() => setIsAgentMcpModalOpen(false)}
         activeTenantId={activeTenant?.id}
+      />
+
+      {/* User Space & Personal Agent Secret Keys Modal */}
+      <UserSpaceModal
+        isOpen={isUserSpaceModalOpen}
+        onClose={() => setIsUserSpaceModalOpen(false)}
+        user={authUser}
+        activeTenant={activeTenant}
+        onSignOut={handleSignOut}
+        onOpenWorkspaceSwitcher={() => setIsWorkspaceModalOpen(true)}
+        onOpenFullMcpModal={() => setIsAgentMcpModalOpen(true)}
       />
     </div>
   );
