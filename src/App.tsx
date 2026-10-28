@@ -11,7 +11,7 @@ import { WorkspaceHubView } from './components/WorkspaceHubView';
 import { ConfirmationModal } from './components/ConfirmationModal';
 import { WorkspaceSwitcherModal } from './components/tenants/WorkspaceSwitcherModal';
 import { Client, Lead, WorkspaceAuthUser, Tenant } from './types';
-import { initAuth, googleSignIn, logout, fetchClientsFromFirestore, saveClientToFirestore } from './lib/firebase';
+import { initAuth, googleSignIn, operatorSignIn, logout, fetchClientsFromFirestore, saveClientToFirestore } from './lib/firebase';
 import { findOrCreateMasterSheet } from './lib/workspace';
 import { api } from './lib/api';
 import { FileSpreadsheet, Search, Send, Calendar, PlusCircle, Users } from 'lucide-react';
@@ -25,85 +25,9 @@ export default function App() {
   const [activeTenant, setActiveTenant] = useState<Tenant | null>(null);
   const [isWorkspaceModalOpen, setIsWorkspaceModalOpen] = useState<boolean>(false);
 
-  // Initial client record to ensure immediate operational populated state
-  const [clients, setClients] = useState<Client[]>([
-    {
-      id: 'C001',
-      name: 'HyperScale AI',
-      platform: 'YouTube & Apple Podcasts',
-      niche: 'B2B SaaS, Cloud DevOps, AI Infrastructure',
-      package: '120-Day Growth Accelerator',
-      pricing: '$6,000 Total ($3,000 Upfront / $3,000 M2)',
-      minSubscribers: 2500,
-      contractDays: 120,
-      startDate: '2026-10-24',
-      endDate: '2027-02-21',
-      stage: 'Lead Sourcing',
-      status: 'Active',
-      orderNumber: 'ORD-2026-C001',
-      targetPlacements: 10,
-      bookedPlacements: 1,
-      stageHistory: [
-        {
-          fromStage: 'Onboarding',
-          toStage: 'Scoping',
-          timestamp: '2026-10-24T08:00:00.000Z',
-          note: 'Agreement parsed, deliverables approved by operations lead.',
-        },
-        {
-          fromStage: 'Scoping',
-          toStage: 'Lead Sourcing',
-          timestamp: '2026-10-24T09:00:00.000Z',
-          note: 'Requirements document generated; keyword dorks initialized.',
-        },
-      ],
-
-      messagePillars: [
-        'Why AI agents will replace traditional SaaS dashboards by 2027',
-        'How to scale vector databases to 100M+ queries with zero downtime',
-        'Lessons learned bootstrapping to $1.2M ARR before institutional capital',
-      ],
-      credibilityAssets: [
-        'Scaled developer platform to 45k monthly active engineers',
-        'Ranked #1 on Hacker News twice with 800+ upvotes',
-      ],
-      samplePitchAngle: 'High-leverage engineering and founder insights on AI agents replacing traditional web dashboards.',
-      milestones: [
-        {
-          title: 'Kickoff, Messaging Profile & First 15 Pitches',
-          dayOffset: 30,
-          dueDate: '2026-11-23',
-          completed: true,
-        },
-        {
-          title: 'First Wave of Recorded Interviews Published',
-          dayOffset: 60,
-          dueDate: '2026-12-23',
-          completed: false,
-        },
-        {
-          title: 'Mid-Contract Performance Review & Niche Expansion',
-          dayOffset: 90,
-          dueDate: '2027-01-22',
-          completed: false,
-        },
-        {
-          title: 'Final Placement Close & Audience Asset Wrap-up',
-          dayOffset: 120,
-          dueDate: '2027-02-21',
-          completed: false,
-        },
-      ],
-      docs: {
-        requirementsDocTitle: 'Client_Requirements_HyperScale_AI',
-        conversationExportTitle: 'Conversation_Export_HyperScale_AI',
-        outreachStrategyDocTitle: 'Outreach_Strategy_HyperScale_AI',
-      },
-      lastSyncedAt: new Date().toISOString(),
-    },
-  ]);
-
-  const [activeClientId, setActiveClientId] = useState<string>('C001');
+  // Client records loaded dynamically from database / Firestore (no hardcoded test data)
+  const [clients, setClients] = useState<Client[]>([]);
+  const [activeClientId, setActiveClientId] = useState<string>('');
   const [activePitchLead, setActivePitchLead] = useState<Lead | null>(null);
 
   // Authentication State
@@ -163,11 +87,9 @@ export default function App() {
         // Sync with Cloud Firestore
         try {
           const cloudClients = await fetchClientsFromFirestore(user.uid);
-          if (cloudClients.length > 0) {
-            setClients(cloudClients);
-          } else {
-            // Seed initial client to Firestore for user
-            await saveClientToFirestore(clients[0], user.uid);
+          setClients(cloudClients);
+          if (cloudClients.length > 0 && !activeClientId) {
+            setActiveClientId(cloudClients[0].id);
           }
         } catch (e) {
           console.warn('Firestore client load deferred:', e);
@@ -175,6 +97,7 @@ export default function App() {
       },
       () => {
         setAuthUser(null);
+        api.setSessionToken(null);
         api.setUserContext('operator_system', 'operator@podconnect.agency');
         loadTenants();
       }
@@ -201,10 +124,9 @@ export default function App() {
 
       try {
         const cloudClients = await fetchClientsFromFirestore(result.user.uid);
+        setClients(cloudClients);
         if (cloudClients.length > 0) {
-          setClients(cloudClients);
-        } else {
-          await saveClientToFirestore(clients[0], result.user.uid);
+          setActiveClientId(cloudClients[0].id);
         }
       } catch (e) {
         console.warn('Firestore initial sync error:', e);
@@ -215,6 +137,18 @@ export default function App() {
         setMasterSheetUrl(sheet.spreadsheetUrl);
       } catch (e) {
         console.warn('Master sheet discovery deferred:', e);
+      }
+
+      // Establish verified server session token
+      try {
+        await api.loginSession({
+          authType: 'firebase_id_token',
+          token: result.accessToken,
+          email: result.user.email || undefined,
+        });
+        await loadTenants();
+      } catch (e) {
+        console.warn('Server session creation deferred:', e);
       }
     } catch (err: any) {
       if (
@@ -230,8 +164,35 @@ export default function App() {
     }
   };
 
+  const handleOperatorSignIn = async () => {
+    setIsLoggingIn(true);
+    setAuthError(null);
+    try {
+      const result = await operatorSignIn('operator@podconnect.agency');
+      setAuthUser({
+        displayName: result.user.displayName,
+        email: result.user.email,
+        photoURL: undefined,
+        uid: result.user.uid,
+      });
+
+      api.setUserContext(result.user.uid, result.user.email);
+      await api.loginSession({
+        authType: 'credentials',
+        email: result.user.email,
+        tenantId: activeTenant?.id || 'tenant_default',
+      });
+      await loadTenants();
+    } catch (err: any) {
+      setAuthError(err?.message || 'Operator access failed. Please try again.');
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
   const handleSignOut = async () => {
     await logout();
+    await api.logoutSession();
     setAuthUser(null);
   };
 
@@ -295,6 +256,7 @@ export default function App() {
         onNavigate={setCurrentView}
         user={authUser}
         onSignIn={handleSignIn}
+        onOperatorSignIn={handleOperatorSignIn}
         onSignOut={handleSignOut}
         isLoggingIn={isLoggingIn}
         onQuickAction={() => setCurrentView('onboarding')}
@@ -309,6 +271,12 @@ export default function App() {
           <div className="flex items-center gap-2">
             <span className="font-semibold text-rose-400">Authentication notice:</span>
             <span>{authError}</span>
+            <button
+              onClick={handleOperatorSignIn}
+              className="ml-2 underline text-indigo-300 hover:text-indigo-100 cursor-pointer font-medium"
+            >
+              Sign in as Operator
+            </button>
           </div>
           <button
             onClick={() => setAuthError(null)}

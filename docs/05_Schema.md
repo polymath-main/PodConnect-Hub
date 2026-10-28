@@ -195,6 +195,33 @@ CREATE TABLE IF NOT EXISTS job_logs (
 CREATE INDEX IF NOT EXISTS idx_job_logs_job ON job_logs(job_id);
 ```
 
+### 2.7 `sessions`
+
+Multi-actor authentication session tokens supporting both interactive users (Google OAuth / Firebase) and autonomous AI agents (Agent Secret Key).
+
+```sql
+CREATE TABLE IF NOT EXISTS sessions (
+  id          TEXT PRIMARY KEY,              -- Format: 'pcs_<uuid>'
+  user_id     TEXT NOT NULL,                 -- Firebase UID or Agent ID
+  email       TEXT NOT NULL,                 -- User/Agent email address
+  tenant_id   TEXT NOT NULL,                 -- FK → tenants.id
+  role        TEXT NOT NULL DEFAULT 'member',-- Role inside active tenant
+  auth_type   TEXT NOT NULL,                 -- 'firebase_id_token' | 'agent_key' | 'credentials'
+  user_agent  TEXT,                          -- Client identifier string
+  ip_address  TEXT,                          -- Remote IP address
+  created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  expires_at  TIMESTAMP NOT NULL,            -- ISO 8601 expiry timestamp
+  revoked_at  TIMESTAMP,                     -- NULL if active; timestamp when revoked
+  FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+);
+```
+
+**Indexes**:
+```sql
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+```
+
 ---
 
 ## 3. Migration Strategy

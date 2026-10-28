@@ -12,3 +12,4 @@ __pycache__/
 # SQLite temporary runtime lock files
 *.db-wal
 *.db-shm
+.vercel

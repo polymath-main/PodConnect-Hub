@@ -1,4 +1,5 @@
 import { spawn, ChildProcess } from 'child_process';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { Response } from 'express';
@@ -8,6 +9,19 @@ import { ScrapeJob } from '../types';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const SCRAPER_SCRIPT_PATH = path.resolve(__dirname, '../../scraper.py');
+
+/**
+ * Dynamically resolves the Python binary across Termux and standard server runtimes
+ */
+export function resolvePythonBinary(): string {
+  if (process.env.PYTHON_BIN) return process.env.PYTHON_BIN;
+  const prefix = process.env.PREFIX;
+  if (prefix) {
+    const termuxPy = path.join(prefix, 'bin', 'python3');
+    if (fs.existsSync(termuxPy)) return termuxPy;
+  }
+  return 'python3';
+}
 
 interface ActiveWorker {
   process: ChildProcess;
@@ -163,7 +177,7 @@ export class JobQueueManager {
     });
 
     const py = spawn(
-      'python3',
+      resolvePythonBinary(),
       [
         SCRAPER_SCRIPT_PATH,
         '--tenant-id',

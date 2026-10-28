@@ -9,13 +9,18 @@ import {
   OutreachSequence,
   SequenceTouchpoint,
   PipelineStage,
+  LoginSessionRequest,
+  LoginSessionResponse,
+  JsonRpcResponse,
 } from '../types';
 import { PlanLimits } from './plans';
 
 const STORAGE_ACTIVE_TENANT_KEY = 'podconnect_active_tenant_id';
+const STORAGE_SESSION_TOKEN_KEY = 'podconnect_session_token';
 
 class ApiClient {
   private activeTenantId: string = localStorage.getItem(STORAGE_ACTIVE_TENANT_KEY) || 'tenant_default';
+  private sessionToken: string | null = localStorage.getItem(STORAGE_SESSION_TOKEN_KEY);
   private userId: string = 'operator_system';
   private userEmail: string = 'operator@podconnect.agency';
 
@@ -26,6 +31,19 @@ class ApiClient {
 
   public getTenantId(): string {
     return this.activeTenantId;
+  }
+
+  public setSessionToken(token: string | null) {
+    this.sessionToken = token;
+    if (token) {
+      localStorage.setItem(STORAGE_SESSION_TOKEN_KEY, token);
+    } else {
+      localStorage.removeItem(STORAGE_SESSION_TOKEN_KEY);
+    }
+  }
+
+  public getSessionToken(): string | null {
+    return this.sessionToken;
   }
 
   public setUserContext(userId: string, email: string) {
@@ -41,6 +59,10 @@ class ApiClient {
       'x-user-email': this.userEmail,
       ...((options.headers as Record<string, string>) || {}),
     };
+
+    if (this.sessionToken) {
+      headers['Authorization'] = `Bearer ${this.sessionToken}`;
+    }
 
     const baseUrl = (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '');
     const url = endpoint.startsWith('http')
@@ -295,6 +317,52 @@ class ApiClient {
       method: 'POST',
       body: JSON.stringify(params),
     });
+  }
+
+  // --- Session Management & Agent MCP Methods ---
+  public async loginSession(payload: LoginSessionRequest): Promise<LoginSessionResponse> {
+    const res = await this.request<LoginSessionResponse>('/api/auth/session', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    if (res.sessionToken) {
+      this.setSessionToken(res.sessionToken);
+      this.setUserContext(res.user.uid, res.user.email);
+      if (res.activeTenant?.id) {
+        this.setTenantId(res.activeTenant.id);
+      }
+    }
+    return res;
+  }
+
+  public async getSession(): Promise<LoginSessionResponse> {
+    return this.request<LoginSessionResponse>('/api/auth/session');
+  }
+
+  public async logoutSession(): Promise<void> {
+    try {
+      await this.request<{ success: boolean }>('/api/auth/session', { method: 'DELETE' });
+    } catch {
+      // Ignore network errors on logout
+    } finally {
+      this.setSessionToken(null);
+    }
+  }
+
+  public async callMcpTool(name: string, args: Record<string, any> = {}): Promise<any> {
+    const res = await this.request<JsonRpcResponse>('/api/mcp', {
+      method: 'POST',
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: Date.now(),
+        method: 'tools/call',
+        params: { name, arguments: args },
+      }),
+    });
+    if (res.error) {
+      throw new Error(`MCP Error (${res.error.code}): ${res.error.message}`);
+    }
+    return res.result;
   }
 }
 

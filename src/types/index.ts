@@ -267,3 +267,80 @@ export interface JobLogEntry {
   metadata?: any;
 }
 
+// --- Session & Multi-Actor Auth Contracts ---
+export type AuthType = 'firebase_id_token' | 'agent_key' | 'credentials';
+
+export interface UserSession {
+  id: string;               // Session token UUID / hash
+  userId: string;           // Firebase UID or Agent Identifier
+  email: string;            // User or Agent email
+  tenantId: string;         // Active bound workspace ID
+  role: UserRole;           // User role in this workspace
+  authType: AuthType;       // Auth mechanism used
+  userAgent?: string;
+  ipAddress?: string;
+  createdAt: string;
+  expiresAt: string;
+  revokedAt?: string | null;
+}
+
+export interface LoginSessionRequest {
+  authType: AuthType;
+  token?: string;           // Firebase ID token OR Agent API key
+  email?: string;           // Optional identifier
+  tenantId?: string;        // Target workspace
+  clientMeta?: {
+    clientName?: string;
+    clientVersion?: string;
+  };
+}
+
+export interface LoginSessionResponse {
+  success: boolean;
+  sessionToken: string;
+  expiresAt: string;
+  user: {
+    uid: string;
+    email: string;
+    role: UserRole;
+    isAgent: boolean;
+  };
+  activeTenant: {
+    id: string;
+    name: string;
+    slug: string;
+    plan: 'starter' | 'growth' | 'agency' | 'enterprise';
+  };
+  availableTenants: Tenant[];
+}
+
+// --- Lightweight MCP Protocol Contracts ---
+export interface JsonRpcRequest {
+  jsonrpc: '2.0';
+  id?: string | number | null;
+  method: string;
+  params?: Record<string, any>;
+}
+
+export interface JsonRpcResponse {
+  jsonrpc: '2.0';
+  id: string | number | null;
+  result?: any;
+  error?: {
+    code: number;
+    message: string;
+    data?: any;
+  };
+}
+
+export interface McpToolDefinition {
+  name: string;
+  description: string;
+  inputSchema: {
+    type: 'object';
+    properties: Record<string, any>;
+    required?: string[];
+  };
+}
+
+

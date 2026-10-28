@@ -190,11 +190,20 @@ All routes under `/api/*` (except `/api/health`) require `Authorization: Bearer 
 | Method | Route | Role | Description |
 |--------|-------|------|-------------|
 | `GET` | `/api/health` | Public | Server health check |
+| `POST` | `/api/auth/session` | Public | Multi-actor login session request (Firebase Token or Agent Key) |
+| `GET` | `/api/auth/session` | Authenticated | Inspect active session profile, user role & tenant |
+| `DELETE` | `/api/auth/session` | Authenticated | Revoke active session token (Logout) |
 | `GET` | `/api/tenants` | Any | List workspaces for user |
 | `POST` | `/api/tenants` | Any | Create new workspace |
 | `GET` | `/api/tenants/:id/members` | Any | List workspace members |
 | `POST` | `/api/tenants/:id/members` | owner/admin | Invite member |
 | `PUT` | `/api/tenants/:id/members/:uid` | owner/admin | Update member role |
+
+### Model Context Protocol (MCP) Server
+| Method | Route | Role | Description |
+|--------|-------|------|-------------|
+| `GET` | `/api/mcp` | Public | MCP server manifest, protocol version & available tools catalog |
+| `POST` | `/api/mcp` | Authenticated | Streamable JSON-RPC 2.0 endpoint (`initialize`, `tools/list`, `tools/call`, `resources/list`) |
 
 ### Staged Leads
 | Method | Route | Description |

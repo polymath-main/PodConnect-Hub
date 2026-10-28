@@ -1,13 +1,16 @@
 import express, { type Request, type Response } from 'express';
 import { GoogleGenAI, Type } from '@google/genai';
 import path from 'path';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { dbService } from './src/server/db.js';
 import { jobQueue } from './src/server/queue.js';
-import { authMiddleware, requireRole, requireQuota, type AuthenticatedRequest } from './src/server/auth.js';
+import { authMiddleware, requireRole, requireQuota, validateAgentKey, type AuthenticatedRequest } from './src/server/auth.js';
 import { emailService } from './src/server/email.js';
 import { getLimits } from './src/lib/plans.js';
+import { handleMcpRequest, MCP_TOOLS } from './src/server/mcp.js';
+import type { LoginSessionRequest, LoginSessionResponse, UserRole } from './src/types/index.js';
 
 dotenv.config();
 
@@ -55,8 +58,232 @@ app.get('/api/health', (_req: Request, res: Response) => {
   });
 });
 
-// Apply Authentication & Multi-Tenant Middleware to all other /api routes
+// ==========================================
+// PUBLIC AUTH & MCP DISCOVERY ROUTES
+// ==========================================
+
+// Sliding window rate limiter for login session requests (max 30 requests/minute per client IP)
+const sessionAuthLimiter: Map<string, number[]> = new Map();
+function checkSessionRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const windowMs = 60_000;
+  const maxAttempts = 30;
+  const history = (sessionAuthLimiter.get(ip) || []).filter((t) => now - t < windowMs);
+
+  if (history.length >= maxAttempts) {
+    return false;
+  }
+  history.push(now);
+  sessionAuthLimiter.set(ip, history);
+  return true;
+}
+
+// Login Session Request: Multi-actor session token issuance (Agents & Users)
+app.post('/api/auth/session', async (req: Request, res: Response) => {
+  try {
+    const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
+    if (!checkSessionRateLimit(clientIp)) {
+      return res.status(429).json({ error: 'Too many authentication attempts. Please wait 1 minute.' });
+    }
+
+    // Opportunistically prune expired sessions (10% of requests)
+    if (Math.random() < 0.1) {
+      dbService.cleanExpiredSessions();
+    }
+
+    const { authType, token, email, tenantId, clientMeta } = req.body as LoginSessionRequest;
+
+    if (!authType) {
+      return res.status(400).json({ error: 'authType is required (firebase_id_token | agent_key | credentials)' });
+    }
+
+    let userId = '';
+    let userEmail = email || '';
+    let role: UserRole = 'member';
+    let isAgent = false;
+
+    if (authType === 'agent_key') {
+      const check = validateAgentKey(token);
+      if (!check.valid) {
+        return res.status(401).json({ error: 'Invalid or unauthorized agent secret key' });
+      }
+      userId = check.agentId;
+      userEmail = userEmail || `${userId}@podconnect.agent`;
+      role = check.role;
+      isAgent = true;
+    } else if (authType === 'firebase_id_token') {
+      if (!token) {
+        return res.status(400).json({ error: 'token is required for firebase_id_token auth' });
+      }
+      // Decode JWT payload without third-party library dependency
+      try {
+        const parts = token.split('.');
+        if (parts.length === 3) {
+          const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
+          userId = payload.user_id || payload.sub || 'user_firebase';
+          userEmail = userEmail || payload.email || `${userId}@user.podconnect`;
+        } else {
+          userId = 'user_' + token.substring(0, 10);
+        }
+      } catch {
+        userId = 'user_' + Date.now();
+      }
+      role = 'owner';
+    } else if (authType === 'credentials') {
+      userId = req.body.username || req.body.email || 'operator_system';
+      userEmail = userEmail || `${userId}@podconnect.agency`;
+      role = 'owner';
+    } else {
+      return res.status(400).json({ error: `Unsupported authType: ${authType}` });
+    }
+
+    // Resolve or target tenant
+    let targetTenantId = tenantId;
+    if (!targetTenantId) {
+      const userTenants = dbService.getTenantsForUser(userId, userEmail);
+      if (userTenants.length > 0) {
+        targetTenantId = userTenants[0].id;
+      } else {
+        targetTenantId = 'tenant_default';
+      }
+    }
+
+    // Ensure membership in target tenant
+    const existingRole = dbService.getUserRoleInTenant(targetTenantId, userId, userEmail);
+    if (!existingRole) {
+      dbService.addTenantMember(targetTenantId, userEmail, role, userId);
+    } else {
+      role = existingRole;
+    }
+
+    // Generate cryptographic session token
+    const sessionToken = `pcs_${crypto.randomUUID().replace(/-/g, '')}`;
+    const durationDays = isAgent ? 30 : 7;
+    const expiresAt = new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000).toISOString();
+
+    const session = dbService.createSession({
+      id: sessionToken,
+      userId,
+      email: userEmail,
+      tenantId: targetTenantId,
+      role,
+      authType,
+      userAgent: clientMeta?.clientName || (req.headers['user-agent'] as string) || undefined,
+      ipAddress: (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || undefined,
+      expiresAt,
+    });
+
+    const activeTenant = dbService.getTenantById(targetTenantId);
+    const availableTenants = dbService.getTenantsForUser(userId, userEmail);
+
+    const response: LoginSessionResponse = {
+      success: true,
+      sessionToken: session.id,
+      expiresAt: session.expiresAt,
+      user: {
+        uid: session.userId,
+        email: session.email,
+        role: session.role,
+        isAgent,
+      },
+      activeTenant: activeTenant
+        ? {
+            id: activeTenant.id,
+            name: activeTenant.name,
+            slug: activeTenant.slug,
+            plan: activeTenant.plan as any,
+          }
+        : {
+            id: 'tenant_default',
+            name: 'Primary Agency Workspace',
+            slug: 'primary-workspace',
+            plan: 'growth',
+          },
+      availableTenants,
+    };
+
+    return res.status(200).json(response);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Session creation failed' });
+  }
+});
+
+// MCP Public Discovery Manifest
+app.get('/api/mcp', (_req: Request, res: Response) => {
+  res.json({
+    name: 'podconnect-hub',
+    version: '2.0.0',
+    protocolVersion: '2024-11-05',
+    transport: 'HTTP JSON-RPC 2.0 (Streamable POST)',
+    endpoint: '/api/mcp',
+    toolsCount: MCP_TOOLS.length,
+    tools: MCP_TOOLS.map((t) => ({ name: t.name, description: t.description })),
+  });
+});
+
+// Apply Authentication & Multi-Tenant Middleware to all protected /api routes
 app.use('/api', authMiddleware as any);
+
+// ==========================================
+// PROTECTED SESSION & MCP ROUTES
+// ==========================================
+
+// Inspect active session
+app.get('/api/auth/session', (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const session = req.session;
+    const activeTenant = dbService.getTenantById(req.tenantId || 'tenant_default');
+    const availableTenants = dbService.getTenantsForUser(req.user!.uid, req.user!.email);
+
+    res.json({
+      success: true,
+      sessionToken: session?.id || null,
+      expiresAt: session?.expiresAt || null,
+      user: {
+        uid: req.user!.uid,
+        email: req.user!.email,
+        role: req.userRole || 'member',
+        isAgent: req.user?.isAgent || false,
+      },
+      activeTenant,
+      availableTenants,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to inspect session' });
+  }
+});
+
+// Revoke active session (Logout)
+app.delete('/api/auth/session', (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    const sessionHeader = req.headers['x-session-token'] as string;
+    let token = sessionHeader;
+    if (!token && authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.substring(7).trim();
+    }
+    if (token) {
+      dbService.revokeSession(token);
+    }
+    res.json({ success: true, message: 'Session successfully revoked' });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to revoke session' });
+  }
+});
+
+// Model Context Protocol JSON-RPC 2.0 Dispatcher (Vercel Serverless Ready)
+app.post('/api/mcp', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const result = await handleMcpRequest(req, req.body);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({
+      jsonrpc: '2.0',
+      id: req.body?.id || null,
+      error: { code: -32603, message: err.message || 'MCP execution failed' },
+    });
+  }
+});
 
 // ==========================================
 // 1. TENANTS & WORKSPACE MANAGEMENT

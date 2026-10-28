@@ -102,7 +102,7 @@ This keeps the plan file as the **live source of truth** for project state.
 pkg install nodejs-lts python
 
 # Install deps
-cd /data/data/com.termux/files/home/Projects/PodConnect-Hub
+cd ~/Projects/PodConnect-Hub
 npm install --legacy-peer-deps
 
 # Set environment

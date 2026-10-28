@@ -13,6 +13,7 @@ import {
   JobLogEntry,
   OutreachSequence,
   PipelineStage,
+  UserSession,
 } from '../types';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -200,6 +201,26 @@ export class DatabaseService {
     `);
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_seq_tenant_lead ON outreach_sequences(tenant_id, lead_id);');
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_seq_stage ON outreach_sequences(pipeline_stage);');
+
+    // 8. Sessions table (Multi-Actor Auth & Session Management)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        email TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'member',
+        auth_type TEXT NOT NULL,
+        user_agent TEXT,
+        ip_address TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        expires_at TIMESTAMP NOT NULL,
+        revoked_at TIMESTAMP,
+        FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+      );
+    `);
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);');
 
     // Migrations: Add tenant_id to staged_leads and leads if not present
     this.runMigrations();
@@ -1138,6 +1159,71 @@ export class DatabaseService {
 
     params.push(leadId);
     this.db.prepare(`UPDATE outreach_sequences SET ${updates.join(', ')} WHERE lead_id = ?`).run(...params);
+  }
+
+  // --- Session Management ---
+  createSession(session: Omit<UserSession, 'createdAt'>): UserSession {
+    this.db.prepare(`
+      INSERT INTO sessions (id, user_id, email, tenant_id, role, auth_type, user_agent, ip_address, expires_at, revoked_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      session.id,
+      session.userId,
+      session.email,
+      session.tenantId,
+      session.role,
+      session.authType,
+      session.userAgent || null,
+      session.ipAddress || null,
+      session.expiresAt,
+      session.revokedAt || null
+    );
+
+    const row = this.db.prepare('SELECT * FROM sessions WHERE id = ?').get(session.id) as any;
+    return this.mapSessionRow(row);
+  }
+
+  getSession(id: string): UserSession | null {
+    const row = this.db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as any;
+    if (!row) return null;
+    return this.mapSessionRow(row);
+  }
+
+  revokeSession(id: string): boolean {
+    const result = this.db.prepare(`
+      UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP WHERE id = ? AND revoked_at IS NULL
+    `).run(id);
+    return Number(result.changes) > 0;
+  }
+
+  revokeAllUserSessions(userId: string): number {
+    const result = this.db.prepare(`
+      UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ? AND revoked_at IS NULL
+    `).run(userId);
+    return Number(result.changes);
+  }
+
+  cleanExpiredSessions(): number {
+    const result = this.db.prepare(`
+      DELETE FROM sessions WHERE expires_at < CURRENT_TIMESTAMP OR (revoked_at IS NOT NULL AND datetime(revoked_at, '+30 days') < CURRENT_TIMESTAMP)
+    `).run();
+    return Number(result.changes);
+  }
+
+  private mapSessionRow(row: any): UserSession {
+    return {
+      id: row.id,
+      userId: row.user_id,
+      email: row.email,
+      tenantId: row.tenant_id,
+      role: row.role as UserRole,
+      authType: row.auth_type,
+      userAgent: row.user_agent || undefined,
+      ipAddress: row.ip_address || undefined,
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
+      revokedAt: row.revoked_at || null,
+    };
   }
 }
 

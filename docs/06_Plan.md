@@ -159,6 +159,19 @@
 
 ---
 
+## Phase 10: Unified Login Session Engine & Lightweight Vercel-Hosted MCP Server ✅ COMPLETE
+
+- [x] 2026-10-28T15:05:00+06:00 — Implement multi-actor session contracts and lightweight MCP protocol types in `src/types/index.ts`
+- [x] 2026-10-28T15:05:15+06:00 — Create SQLite `sessions` table in `src/server/db.ts` with indices and session lifecycle CRUD methods (`createSession`, `getSession`, `revokeSession`, `cleanExpiredSessions`)
+- [x] 2026-10-28T15:05:30+06:00 — Upgrade `src/server/auth.ts` middleware with cryptographic session token resolution, revocation checks, and agent key validation
+- [x] 2026-10-28T15:05:45+06:00 — Create zero-dependency lightweight MCP JSON-RPC 2.0 router in `src/server/mcp.ts` exposing 8 core CRM & outreach tools
+- [x] 2026-10-28T15:06:00+06:00 — Mount `/api/auth/session` (POST, GET, DELETE) and `/api/mcp` (GET manifest, POST JSON-RPC) in `server.ts`
+- [x] 2026-10-28T15:06:15+06:00 — Integrate session persistence and MCP calling in `src/lib/api.ts` and synchronize session state in `src/App.tsx`
+- [x] 2026-10-28T15:06:30+06:00 — Create comprehensive automated verification test suite `scratch/test_session_and_mcp.ts`: 9/9 tests PASSED
+- [x] 2026-10-28T15:06:45+06:00 — Update `docs/04_TRD.md` API specification and `docs/05_Schema.md` database documentation
+
+---
+
 ## Verification Commands
 
 ```bash
@@ -179,6 +192,9 @@ python3 scratch/test_swarm_discovery.py
 
 # Multi-touch outreach sequence & cadence test suite (Phase 8)
 node ./node_modules/tsx/dist/cli.mjs scratch/test_outreach_sequence.ts
+
+# Login Session Request & Vercel-Hosted MCP test suite (Phase 10)
+node ./node_modules/tsx/dist/cli.mjs scratch/test_session_and_mcp.ts
 
 # Server health check
 curl http://localhost:3000/api/health
