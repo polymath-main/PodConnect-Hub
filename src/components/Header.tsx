@@ -145,6 +145,14 @@ export const Header: React.FC<HeaderProps> = ({
         >
           Workspace
         </button>
+        <button
+          onClick={() => onNavigate('logs')}
+          className={`hover:text-slate-100 transition-colors whitespace-nowrap shrink-0 cursor-pointer py-1 flex items-center gap-1.5 ${
+            currentView === 'logs' ? 'text-indigo-400 font-semibold' : ''
+          }`}
+        >
+          <span>Logs & Audit</span>
+        </button>
       </nav>
 
       {/* Zone 3: 1 primary action or authentication button */}

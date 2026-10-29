@@ -13,9 +13,10 @@ import { jobQueue } from './src/server/queue.js';
 import { authMiddleware, requireRole, requireQuota, type AuthenticatedRequest } from './src/server/auth.js';
 import { emailService } from './src/server/email.js';
 import { getLimits } from './src/lib/plans.js';
-import { handleMcpRequest, MCP_TOOLS } from './src/server/mcp.js';
+import { handleMcpRequest, MCP_TOOLS, MCP_RESOURCES, MCP_PROMPTS } from './src/server/mcp.js';
 import { validateAgentKey } from './src/server/auth.js';
 import { discoverEmailsForUrl } from './src/server/nativeScraper.js';
+import { eventLogger } from './src/server/eventLogger.js';
 import type { OutreachSequence, PipelineStage, SequenceStep } from './src/types/index.js';
 
 dotenv.config();
@@ -1051,11 +1052,21 @@ Format output as JSON:
 app.get('/api/mcp', (_req: Request, res: Response) => {
   res.json({
     name: 'podconnect-hub',
-    version: '2.0.0',
+    version: '2.5.0',
     protocolVersion: '2024-11-05',
-    description: 'PodConnect Hub Model Context Protocol (MCP) Server',
+    description: 'PodConnect Hub Model Context Protocol (MCP) Server for Autonomous Podcast Marketing Agents',
+    capabilities: {
+      tools: { listChanged: false },
+      resources: { subscribe: false, listChanged: false },
+      prompts: { listChanged: false },
+      logging: {},
+    },
     toolsCount: MCP_TOOLS.length,
     tools: MCP_TOOLS.map((t) => ({ name: t.name, description: t.description })),
+    resourcesCount: MCP_RESOURCES.length,
+    resources: MCP_RESOURCES.map((r) => ({ uri: r.uri, name: r.name, mimeType: r.mimeType })),
+    promptsCount: MCP_PROMPTS.length,
+    prompts: MCP_PROMPTS.map((p) => ({ name: p.name, description: p.description })),
   });
 });
 
@@ -1269,10 +1280,14 @@ app.get('/api/auth/agent', (req: AuthenticatedRequest, res: Response) => {
 // Retrieve User Agent Key & 1-Click MCP Config
 app.get('/api/user/agent-key', (req: AuthenticatedRequest, res: Response) => {
   try {
+    if (!req.user || !req.user.uid) {
+      return res.status(401).json({ success: false, error: 'Unauthorized: Authentication session required' });
+    }
+
     const tenantId = req.tenantId || 'tenant_default';
-    const userId = req.user?.uid || 'operator_system';
-    const email = req.user?.email || 'operator@podconnect.agency';
-    const role = req.userRole || 'owner';
+    const userId = req.user.uid;
+    const email = req.user.email || `${userId}@podconnect.agency`;
+    const role = req.userRole || 'member';
 
     let keyRecord: any = (dbService as any).db.prepare(`
       SELECT * FROM user_agent_keys
@@ -1315,10 +1330,14 @@ app.get('/api/user/agent-key', (req: AuthenticatedRequest, res: Response) => {
 // Rotate User Agent Key
 app.post('/api/user/agent-key/rotate', (req: AuthenticatedRequest, res: Response) => {
   try {
+    if (!req.user || !req.user.uid) {
+      return res.status(401).json({ success: false, error: 'Unauthorized: Authentication session required' });
+    }
+
     const tenantId = req.tenantId || 'tenant_default';
-    const userId = req.user?.uid || 'operator_system';
-    const email = req.user?.email || 'operator@podconnect.agency';
-    const role = req.userRole || 'owner';
+    const userId = req.user.uid;
+    const email = req.user.email || `${userId}@podconnect.agency`;
+    const role = req.userRole || 'member';
 
     // Revoke previous active keys
     const existing = dbService.getUserAgentKeys(tenantId, userId);
@@ -1327,6 +1346,12 @@ app.post('/api/user/agent-key/rotate', (req: AuthenticatedRequest, res: Response
     }
 
     const created = dbService.createUserAgentKey(userId, email, tenantId, role);
+    eventLogger.logAudit(`User agent key rotated for user ${userId}`, {
+      tenantId,
+      userId,
+      ipAddress: req.ip,
+    });
+
     res.json({
       success: true,
       key: created.key,
@@ -1536,7 +1561,88 @@ app.post('/api/leads/:id/dispatch-touchpoint', async (req: AuthenticatedRequest,
 });
 
 // ==========================================
-// 9. VITE MIDDLEWARE & SERVER STARTUP
+// 9. SYSTEM EVENT CONSOLE & AUDIT LOGS
+// ==========================================
+
+// Query system event logs with multi-field filters
+app.get('/api/system/logs', (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const tenantId = req.tenantId || 'tenant_default';
+    const level = (req.query.level as string) || 'ALL';
+    const category = (req.query.category as string) || 'ALL';
+    const search = (req.query.search as string) || '';
+    const limit = parseInt(req.query.limit as string) || 50;
+    const offset = parseInt(req.query.offset as string) || 0;
+
+    const result = eventLogger.getLogs({
+      tenantId,
+      level,
+      category,
+      search,
+      limit,
+      offset,
+    });
+
+    res.json({
+      success: true,
+      total: result.total,
+      count: result.logs.length,
+      logs: result.logs,
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message || 'Failed to query system logs' });
+  }
+});
+
+// Export system logs formatted as JSON or CSV
+app.get('/api/system/logs/export', (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const tenantId = req.tenantId || 'tenant_default';
+    const format = (req.query.format as string) === 'csv' ? 'csv' : 'json';
+    const level = (req.query.level as string) || 'ALL';
+    const category = (req.query.category as string) || 'ALL';
+    const search = (req.query.search as string) || '';
+
+    const exported = eventLogger.exportLogs(
+      {
+        tenantId,
+        level,
+        category,
+        search,
+      },
+      format
+    );
+
+    res.setHeader('Content-Type', exported.contentType);
+    res.setHeader('Content-Disposition', `attachment; filename="${exported.filename}"`);
+    res.send(exported.content);
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message || 'Failed to export system logs' });
+  }
+});
+
+// Clear system logs (Owner & Admin only)
+app.delete(
+  '/api/system/logs',
+  requireRole(['owner', 'admin']) as any,
+  (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const tenantId = req.tenantId || 'tenant_default';
+      eventLogger.clearLogs(tenantId);
+      eventLogger.logAudit(`System logs cleared by user ${req.user?.uid || 'unknown'}`, {
+        tenantId,
+        userId: req.user?.uid,
+        ipAddress: req.ip,
+      });
+      res.json({ success: true, message: 'System logs cleared successfully' });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message || 'Failed to clear system logs' });
+    }
+  }
+);
+
+// ==========================================
+// 10. VITE MIDDLEWARE & SERVER STARTUP
 // ==========================================
 
 async function startServer() {

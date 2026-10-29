@@ -12,6 +12,7 @@ import { ConfirmationModal } from './components/ConfirmationModal';
 import { WorkspaceSwitcherModal } from './components/tenants/WorkspaceSwitcherModal';
 import { AgentMcpModal } from './components/tenants/AgentMcpModal';
 import { UserSpaceModal } from './components/tenants/UserSpaceModal';
+import { LogsDashboardView } from './components/logs/LogsDashboardView';
 import { LandingPageView } from './components/LandingPageView';
 import { Client, Lead, WorkspaceAuthUser, Tenant } from './types';
 import { initAuth, googleSignIn, operatorSignIn, logout, fetchClientsFromFirestore, saveClientToFirestore } from './lib/firebase';
@@ -59,6 +60,7 @@ export default function App() {
   });
 
   const loadClients = async () => {
+    if (!api.getSessionToken()) return;
     try {
       const res = await api.getClients();
       if (res.success && res.clients && res.clients.length > 0) {
@@ -69,7 +71,7 @@ export default function App() {
         return;
       }
     } catch (e) {
-      console.warn('Database clients load deferred:', e);
+      console.debug('Database clients load deferred:', e);
     }
 
     if (authUser?.uid) {
@@ -82,12 +84,13 @@ export default function App() {
           }
         }
       } catch (e) {
-        console.warn('Firestore fallback client load deferred:', e);
+        console.debug('Firestore fallback client load deferred:', e);
       }
     }
   };
 
   const loadTenants = async () => {
+    if (!api.getSessionToken()) return;
     try {
       const res = await api.getTenants();
       if (res.success && res.tenants.length > 0) {
@@ -98,7 +101,7 @@ export default function App() {
         loadClients();
       }
     } catch (err) {
-      console.warn('Failed to load workspaces:', err);
+      console.debug('Workspaces load deferred until login:', err);
     }
   };
 
@@ -451,6 +454,13 @@ export default function App() {
               isAuthenticated={!!authUser}
               onSignIn={handleSignIn}
               onRequestConfirmation={handleRequestConfirmation}
+            />
+          )}
+
+          {currentView === 'logs' && (
+            <LogsDashboardView
+              tenantId={activeTenant?.id || 'tenant_default'}
+              userRole={activeTenant?.currentRole || 'owner'}
             />
           )}
         </main>

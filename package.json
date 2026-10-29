@@ -10,6 +10,7 @@
     "dev": "tsx server.ts",
     "build": "vite build",
     "start": "tsx server.ts",
+    "mcp:stdio": "tsx mcp/stdio.ts",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit"
   },

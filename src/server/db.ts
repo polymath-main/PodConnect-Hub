@@ -258,6 +258,24 @@ export class DatabaseService {
       );
     `);
 
+    // 11. System Event & Audit Logs table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS system_logs (
+        id TEXT PRIMARY KEY,
+        timestamp TEXT NOT NULL,
+        level TEXT NOT NULL,
+        category TEXT NOT NULL,
+        message TEXT NOT NULL,
+        tenant_id TEXT DEFAULT 'tenant_default',
+        user_id TEXT,
+        ip_address TEXT,
+        metadata TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE INDEX IF NOT EXISTS idx_sys_logs_tenant ON system_logs(tenant_id, timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_sys_logs_level ON system_logs(level);
+    `);
+
     // Migrations: Add tenant_id, email_type, email_confidence to staged_leads and leads if not present
     this.runMigrations();
 
@@ -1612,6 +1630,108 @@ export class DatabaseService {
       tenantId: tenantId || 'tenant_default',
       tables: result,
     };
+  }
+
+  // ==========================================
+  // SYSTEM EVENT & AUDIT LOGS
+  // ==========================================
+
+  public saveSystemLog(log: {
+    id: string;
+    timestamp: string;
+    level: string;
+    category: string;
+    message: string;
+    tenantId: string;
+    userId?: string;
+    ipAddress?: string;
+    metadata?: any;
+  }) {
+    const metaStr = log.metadata ? (typeof log.metadata === 'string' ? log.metadata : JSON.stringify(log.metadata)) : null;
+    this.db.prepare(`
+      INSERT INTO system_logs (id, timestamp, level, category, message, tenant_id, user_id, ip_address, metadata)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      log.id,
+      log.timestamp,
+      log.level,
+      log.category,
+      log.message,
+      log.tenantId || 'tenant_default',
+      log.userId || null,
+      log.ipAddress || null,
+      metaStr
+    );
+  }
+
+  public querySystemLogs(filters: {
+    level?: string;
+    category?: string;
+    search?: string;
+    tenantId?: string;
+    limit?: number;
+    offset?: number;
+  }): { logs: any[]; total: number } {
+    let whereClauses: string[] = [];
+    let params: any[] = [];
+
+    if (filters.tenantId && filters.tenantId !== 'ALL') {
+      whereClauses.push('(tenant_id = ? OR tenant_id = "tenant_default")');
+      params.push(filters.tenantId);
+    }
+
+    if (filters.level && filters.level !== 'ALL') {
+      whereClauses.push('LOWER(level) = LOWER(?)');
+      params.push(filters.level);
+    }
+
+    if (filters.category && filters.category !== 'ALL') {
+      whereClauses.push('LOWER(category) = LOWER(?)');
+      params.push(filters.category);
+    }
+
+    if (filters.search) {
+      whereClauses.push('(LOWER(message) LIKE ? OR LOWER(category) LIKE ? OR LOWER(user_id) LIKE ?)');
+      const pattern = `%${filters.search.toLowerCase()}%`;
+      params.push(pattern, pattern, pattern);
+    }
+
+    const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+
+    const countRow = this.db.prepare(`SELECT count(*) as count FROM system_logs ${whereSql}`).get(...params) as any;
+    const total = countRow?.count || 0;
+
+    const limit = filters.limit || 50;
+    const offset = filters.offset || 0;
+
+    const rows = this.db.prepare(`
+      SELECT id, timestamp, level, category, message, tenant_id as tenantId, user_id as userId, ip_address as ipAddress, metadata
+      FROM system_logs
+      ${whereSql}
+      ORDER BY timestamp DESC
+      LIMIT ? OFFSET ?
+    `).all(...params, limit, offset) as any[];
+
+    const logs = rows.map((r) => {
+      let meta: any = null;
+      if (r.metadata) {
+        try { meta = JSON.parse(r.metadata); } catch { meta = r.metadata; }
+      }
+      return {
+        ...r,
+        metadata: meta,
+      };
+    });
+
+    return { logs, total };
+  }
+
+  public clearSystemLogs(tenantId: string) {
+    if (tenantId === 'ALL') {
+      this.db.prepare('DELETE FROM system_logs').run();
+    } else {
+      this.db.prepare('DELETE FROM system_logs WHERE tenant_id = ?').run(tenantId);
+    }
   }
 }
 

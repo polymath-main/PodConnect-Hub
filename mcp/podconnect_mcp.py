@@ -38,7 +38,7 @@ def get_server_url() -> str:
     return os.environ.get("PODCONNECT_URL", DEFAULT_PROD_URL).rstrip("/")
 
 def get_agent_key() -> str:
-    return os.environ.get("AGENT_SECRET_KEY", "agent_secret_default_podconnect")
+    return os.environ.get("AGENT_SECRET_KEY", "").strip()
 
 def get_tenant_id() -> str:
     return os.environ.get("PODCONNECT_TENANT_ID", "tenant_default")
@@ -127,12 +127,12 @@ def tool_authenticate(params: Dict[str, Any]) -> Dict[str, Any]:
         is_dev = os.environ.get("NODE_ENV") != "production"
         valid = agent_key == get_agent_key() or (is_dev and agent_key == "agent_test_key_podconnect")
         
-        # Check local SQLite agent_api_keys table
+        # Check local SQLite user_agent_keys table
         if not valid and agent_key.startswith("pca_live_"):
             try:
                 conn = _get_db()
                 cur = conn.cursor()
-                cur.execute("SELECT * FROM agent_api_keys WHERE raw_key = ? AND revoked_at IS NULL", [agent_key])
+                cur.execute("SELECT * FROM user_agent_keys WHERE key = ? AND revoked_at IS NULL", [agent_key])
                 row = cur.fetchone()
                 if row:
                     valid = True
@@ -586,31 +586,81 @@ def _handle(request: Dict[str, Any]) -> None:
         _respond(message_id, {"tools": MCP_TOOLS})
         return
 
+    if method == "resources/list":
+        try:
+            res = _http_request("/api/mcp", method="POST", body={"jsonrpc": "2.0", "id": message_id, "method": "resources/list", "params": params})
+            _respond(message_id, res.get("result", {}))
+        except Exception:
+            _respond(message_id, {"resources": [
+                {"uri": f"podconnect://tenants/{get_tenant_id()}", "name": "Active Tenant Context", "mimeType": "application/json"},
+                {"uri": "podconnect://schema", "name": "PodConnect SQLite Schema", "mimeType": "text/markdown"}
+            ]})
+        return
+
+    if method == "resources/read":
+        try:
+            res = _http_request("/api/mcp", method="POST", body={"jsonrpc": "2.0", "id": message_id, "method": "resources/read", "params": params})
+            _respond(message_id, res.get("result", {}))
+        except Exception as e:
+            _respond(message_id, error={"code": -32602, "message": f"Resource read failed: {e}"})
+        return
+
+    if method == "prompts/list":
+        try:
+            res = _http_request("/api/mcp", method="POST", body={"jsonrpc": "2.0", "id": message_id, "method": "prompts/list", "params": params})
+            _respond(message_id, res.get("result", {}))
+        except Exception:
+            _respond(message_id, {"prompts": []})
+        return
+
+    if method == "prompts/get":
+        try:
+            res = _http_request("/api/mcp", method="POST", body={"jsonrpc": "2.0", "id": message_id, "method": "prompts/get", "params": params})
+            _respond(message_id, res.get("result", {}))
+        except Exception as e:
+            _respond(message_id, error={"code": -32602, "message": f"Prompt get failed: {e}"})
+        return
+
     if method == "tools/call":
-        name = params.get("name")
+        name = params.get("name", "")
         args = params.get("arguments") or {}
-        fn = _DISPATCH.get(name)
-        if not fn:
-            _respond(
-                message_id,
-                error={"code": -32601, "message": f"Unknown tool: '{name}'"},
-            )
+
+        # 1. Resolve in local dispatch
+        fn = _DISPATCH.get(name) or _DISPATCH.get(f"podconnect_{name}") or _DISPATCH.get(name.replace("podconnect_", ""))
+
+        if fn:
+            try:
+                out = fn(args)
+                text = json.dumps(out, indent=2) if not isinstance(out, str) else out
+                _respond(
+                    message_id,
+                    {"content": [{"type": "text", "text": text}]},
+                )
+            except Exception as e:
+                _respond(
+                    message_id,
+                    {
+                        "content": [{"type": "text", "text": f"Error: {e}"}],
+                        "isError": True,
+                    },
+                )
             return
 
+        # 2. Delegate to server /api/mcp for extended tools suite
         try:
-            out = fn(args)
-            text = json.dumps(out, indent=2) if not isinstance(out, str) else out
-            _respond(
-                message_id,
-                {"content": [{"type": "text", "text": text}]},
+            res = _http_request(
+                "/api/mcp",
+                method="POST",
+                body={"jsonrpc": "2.0", "id": message_id, "method": "tools/call", "params": params},
             )
+            if "error" in res:
+                _respond(message_id, error=res["error"])
+            else:
+                _respond(message_id, res.get("result", {}))
         except Exception as e:
             _respond(
                 message_id,
-                {
-                    "content": [{"type": "text", "text": f"Error: {e}"}],
-                    "isError": True,
-                },
+                error={"code": -32601, "message": f"Unknown tool or server delegation failed: {name} ({e})"},
             )
         return
 

@@ -10,6 +10,7 @@ import {
   X,
   HardDrive,
   Users,
+  ScrollText,
 } from 'lucide-react';
 import { Client } from '../types';
 
@@ -42,6 +43,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { id: 'outreach', label: 'Outreach & Pitch Hub', icon: Send },
     { id: 'milestones', label: 'Calendar Milestones', icon: Calendar },
     { id: 'workspace', label: 'Google Workspace Hub', icon: HardDrive },
+    { id: 'logs', label: 'Logs & Audit Console', icon: ScrollText },
   ];
 
 

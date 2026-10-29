@@ -1,7 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 import { dbService } from './db.js';
-import { UserRole, UserSession } from '../types';
+import { UserRole, UserSession } from '../types/index.js';
 import { getLimits } from '../lib/plans.js';
+import { eventLogger } from './eventLogger.js';
 
 export interface AuthenticatedRequest extends Request {
   user?: {
@@ -15,7 +16,8 @@ export interface AuthenticatedRequest extends Request {
 }
 
 /**
- * Validates agent secret key (Master key or User-Scoped pca_live_ key)
+ * Validates agent secret key (Master server key or User-Scoped pca_live_ key)
+ * Fails closed strictly: no predictable static defaults are accepted.
  */
 export function validateAgentKey(key?: string, customAgentId?: string): {
   valid: boolean;
@@ -24,19 +26,15 @@ export function validateAgentKey(key?: string, customAgentId?: string): {
   tenantId?: string;
   email?: string;
 } {
-  if (!key) return { valid: false, agentId: '', role: 'viewer' };
-  const expectedKey = process.env.AGENT_SECRET_KEY || 'agent_secret_default_podconnect';
-  const isDev = process.env.NODE_ENV !== 'production';
-
-  // 1. Check server master key
-  if (key === expectedKey || (isDev && key === 'agent_test_key_podconnect')) {
-    const sanitizedId = customAgentId && /^[a-zA-Z0-9_-]{3,64}$/.test(customAgentId) ? customAgentId : 'agent_default';
-    return { valid: true, agentId: sanitizedId, role: 'owner' };
+  if (!key || typeof key !== 'string') {
+    return { valid: false, agentId: '', role: 'viewer' };
   }
 
-  // 2. Check user-scoped agent key in database
-  if (key.startsWith('pca_live_')) {
-    const userKey = dbService.validateUserAgentKey(key);
+  const cleanKey = key.trim();
+
+  // 1. Check user-scoped agent key via HMAC-SHA256 signature and database registry
+  if (cleanKey.startsWith('pca_live_')) {
+    const userKey = dbService.validateUserAgentKey(cleanKey);
     if (userKey && userKey.valid) {
       return {
         valid: true,
@@ -48,15 +46,49 @@ export function validateAgentKey(key?: string, customAgentId?: string): {
     }
   }
 
+  // 2. Check server master key from environment ONLY (strictly >= 16 chars, fail-closed)
+  const masterKey = process.env.AGENT_SECRET_KEY;
+  if (masterKey && masterKey.trim().length >= 16 && cleanKey === masterKey.trim()) {
+    const sanitizedId = customAgentId && /^[a-zA-Z0-9_-]{3,64}$/.test(customAgentId) ? customAgentId : 'agent_default';
+    return { valid: true, agentId: sanitizedId, role: 'owner' };
+  }
+
   return { valid: false, agentId: '', role: 'viewer' };
 }
 
 /**
+ * Paths that are publicly accessible without authentication
+ */
+function isPublicPath(path: string, method: string): boolean {
+  const normalized = path.split('?')[0].replace(/\/+$/, '') || '/';
+
+  // Public health check
+  if (normalized === '/api/health' || normalized === '/health') return true;
+
+  // Session creation & login endpoints
+  if ((normalized === '/api/auth/session' || normalized === '/auth/session') && method === 'POST') return true;
+  if ((normalized === '/api/auth/agent' || normalized === '/auth/agent') && method === 'POST') return true;
+
+  // Public MCP manifest discovery (RFC requirement)
+  if ((normalized === '/api/mcp' || normalized === '/mcp') && method === 'GET') return true;
+
+  return false;
+}
+
+/**
  * Authentication & Multi-Tenant Context Middleware
- * Resolves user/agent identity, validates active sessions, and injects workspace context.
+ * Enforces strict fail-closed security: rejects unauthenticated requests with 401.
  */
 export function authMiddleware(req: AuthenticatedRequest, res: Response, next: NextFunction) {
-  // 1. Extract bearer token, custom session header, x-agent-key, or query param
+  const reqPath = req.path || req.originalUrl || req.url || '';
+  const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || 'unknown';
+
+  // 1. Bypass public endpoints
+  if (isPublicPath(reqPath, req.method) || isPublicPath(req.originalUrl || '', req.method)) {
+    return next();
+  }
+
+  // 2. Extract credentials from authorization header, session header, agent key header, or query param
   const authHeader = req.headers.authorization;
   const sessionHeader = (req.headers['x-session-token'] as string) || '';
   const agentKeyHeader = (req.headers['x-agent-key'] as string) || '';
@@ -66,7 +98,7 @@ export function authMiddleware(req: AuthenticatedRequest, res: Response, next: N
     token = authHeader.substring(7).trim();
   }
 
-  // Support query params for SSE streams and media endpoints where headers cannot be set by browser
+  // Support query params for SSE streams and media downloads
   if (!token && req.query) {
     token = (req.query.token as string) ||
       (req.query.sessionToken as string) ||
@@ -75,15 +107,28 @@ export function authMiddleware(req: AuthenticatedRequest, res: Response, next: N
       '';
   }
 
-  // 2. If token present, check SQLite sessions table
   if (token) {
+    // A. Check verified server session in SQLite
     const session = dbService.getSession(token);
     if (session) {
       if (session.revokedAt) {
-        return res.status(401).json({ error: 'Unauthorized: Session has been revoked.' });
+        eventLogger.logAuth(`Revoked session access attempt: ${session.userId}`, {
+          tenantId: session.tenantId,
+          userId: session.userId,
+          ipAddress: clientIp,
+          success: false,
+        });
+        return res.status(401).json({ success: false, error: 'Unauthorized: Session has been revoked.' });
       }
+
       if (new Date(session.expiresAt).getTime() < Date.now()) {
-        return res.status(401).json({ error: 'Unauthorized: Session has expired. Please sign in again.' });
+        eventLogger.logAuth(`Expired session access attempt: ${session.userId}`, {
+          tenantId: session.tenantId,
+          userId: session.userId,
+          ipAddress: clientIp,
+          success: false,
+        });
+        return res.status(401).json({ success: false, error: 'Unauthorized: Session has expired. Please sign in again.' });
       }
 
       req.session = session;
@@ -93,10 +138,11 @@ export function authMiddleware(req: AuthenticatedRequest, res: Response, next: N
         isAgent: session.authType === 'agent_key',
       };
 
-      // Tenant override via header or query if permitted
+      // Tenant context with role resolution
       const requestedTenant = (req.headers['x-tenant-id'] as string) ||
         (req.query?.tenantId as string) ||
         '';
+
       if (requestedTenant && requestedTenant !== session.tenantId) {
         const role = dbService.getUserRoleInTenant(requestedTenant, session.userId, session.email);
         if (role) {
@@ -114,13 +160,14 @@ export function authMiddleware(req: AuthenticatedRequest, res: Response, next: N
       return next();
     }
 
-    // Check direct agent key
+    // B. Check direct verified Agent Key
     const agentCheck = validateAgentKey(token);
     if (agentCheck.valid) {
       const tenantId = agentCheck.tenantId ||
         (req.headers['x-tenant-id'] as string) ||
         (req.query?.tenantId as string) ||
         'tenant_default';
+
       req.user = {
         uid: agentCheck.agentId,
         email: agentCheck.email || `${agentCheck.agentId}@podconnect.agent`,
@@ -128,52 +175,27 @@ export function authMiddleware(req: AuthenticatedRequest, res: Response, next: N
       };
       req.tenantId = tenantId;
       req.userRole = agentCheck.role;
+
       return next();
     }
   }
 
-  // 3. Fallback: Parse user from legacy custom headers or JWT payload (for local dev/sandbox)
-  let userId = (req.headers['x-user-id'] as string) || '';
-  let userEmail = (req.headers['x-user-email'] as string) || '';
+  // 3. FAIL CLOSED: If no valid session or agent key was provided, reject strictly with 401
+  eventLogger.logAuth(`Unauthorized request blocked: ${req.method} ${reqPath}`, {
+    ipAddress: clientIp,
+    success: false,
+    metadata: {
+      headers: {
+        authorization: authHeader ? 'present (invalid)' : 'missing',
+        hasToken: !!token,
+      },
+    },
+  });
 
-  if (token) {
-    try {
-      const parts = token.split('.');
-      if (parts.length === 3) {
-        const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
-        if (payload.user_id || payload.sub) {
-          userId = userId || payload.user_id || payload.sub;
-          userEmail = userEmail || payload.email || '';
-        }
-      }
-    } catch {
-      // Ignore invalid JWT format
-    }
-  }
-
-  // Fallback for local sandbox / default operator
-  if (!userId) {
-    userId = 'operator_system';
-    userEmail = 'operator@podconnect.agency';
-  }
-
-  // 4. Resolve Active Tenant / Workspace
-  let tenantId = (req.headers['x-tenant-id'] as string) ||
-    (req.query?.tenantId as string) ||
-    '';
-  if (!tenantId) {
-    const tenants = dbService.getTenantsForUser(userId, userEmail);
-    tenantId = tenants.length > 0 ? tenants[0].id : 'tenant_default';
-  }
-
-  // 5. Resolve User Role in this Tenant
-  const role = dbService.getUserRoleInTenant(tenantId, userId, userEmail) || 'owner';
-
-  req.user = { uid: userId, email: userEmail, isAgent: false };
-  req.tenantId = tenantId;
-  req.userRole = role;
-
-  next();
+  return res.status(401).json({
+    success: false,
+    error: 'Unauthorized: Valid authentication session or agent secret key required',
+  });
 }
 
 /**
@@ -183,6 +205,15 @@ export function requireRole(allowedRoles: UserRole[]) {
   return (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     const role = req.userRole;
     if (!role || !allowedRoles.includes(role)) {
+      eventLogger.logAuth(
+        `Forbidden role access: user ${req.user?.uid || 'unknown'} has role '${role}', requires [${allowedRoles.join(', ')}]`,
+        {
+          tenantId: req.tenantId,
+          userId: req.user?.uid,
+          ipAddress: req.ip,
+          success: false,
+        }
+      );
       return res.status(403).json({
         error: `Access Denied: Requires one of [${allowedRoles.join(', ')}] roles in workspace ${req.tenantId}`,
         currentRole: role || 'none',
@@ -204,6 +235,10 @@ export function requireQuota(resource: 'job' | 'seat') {
     if (resource === 'job') {
       const todayJobCount = dbService.getJobCountToday(tenantId);
       if (todayJobCount >= limits.maxJobsPerDay) {
+        eventLogger.logWarn('scraper', `Daily job quota reached for tenant ${tenantId} (${todayJobCount}/${limits.maxJobsPerDay})`, {
+          tenantId,
+          userId: req.user?.uid,
+        });
         return res.status(429).json({
           error: `Daily job limit reached (${limits.maxJobsPerDay} jobs/day on ${tenant?.plan || 'current'} plan). Upgrade to run more.`,
           limitType: 'jobs_per_day',
@@ -215,6 +250,10 @@ export function requireQuota(resource: 'job' | 'seat') {
     if (resource === 'seat') {
       const memberCount = dbService.getTenantMemberCount(tenantId);
       if (memberCount >= limits.maxSeats) {
+        eventLogger.logWarn('auth', `Seat limit reached for tenant ${tenantId} (${memberCount}/${limits.maxSeats})`, {
+          tenantId,
+          userId: req.user?.uid,
+        });
         return res.status(429).json({
           error: `Seat limit reached (${limits.maxSeats} seats on ${tenant?.plan || 'current'} plan). Upgrade to invite more members.`,
           limitType: 'seats',

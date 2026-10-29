@@ -171,6 +171,7 @@ export interface SequenceTouchpoint {
 
 export interface OutreachSequence {
   id?: number;
+  tenantId?: string;
   leadId: number;
   clientId: string;
   initial: SequenceTouchpoint;
@@ -372,6 +373,25 @@ export interface McpToolDefinition {
   };
 }
 
+export interface McpResourceDefinition {
+  uri: string;
+  name: string;
+  mimeType?: string;
+  description?: string;
+}
+
+export interface McpPromptArgument {
+  name: string;
+  description?: string;
+  required?: boolean;
+}
+
+export interface McpPromptDefinition {
+  name: string;
+  description?: string;
+  arguments?: McpPromptArgument[];
+}
+
 export interface UserAgentKey {
   id: string;
   key?: string;
@@ -386,6 +406,18 @@ export interface UserAgentKey {
   expiresAt?: string;
   lastUsedAt?: string;
   revokedAt?: string;
+}
+
+export interface SystemLogItem {
+  id: string;
+  timestamp: string;
+  level: 'INFO' | 'WARN' | 'ERROR' | 'AUTH' | 'AUDIT' | 'MCP';
+  category: 'auth' | 'api' | 'scraper' | 'email' | 'database' | 'mcp' | 'system';
+  message: string;
+  tenantId: string;
+  userId?: string;
+  ipAddress?: string;
+  metadata?: any;
 }
 
 

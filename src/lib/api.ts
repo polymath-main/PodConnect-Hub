@@ -465,6 +465,70 @@ class ApiClient {
     }
     return res.result;
   }
+
+  // ==========================================
+  // SYSTEM EVENT CONSOLE & AUDIT LOGS
+  // ==========================================
+
+  public async getSystemLogs(params?: {
+    level?: string;
+    category?: string;
+    search?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<{ success: boolean; total: number; count: number; logs: any[] }> {
+    const searchParams = new URLSearchParams();
+    if (params?.level && params.level !== 'ALL') searchParams.set('level', params.level);
+    if (params?.category && params.category !== 'ALL') searchParams.set('category', params.category);
+    if (params?.search) searchParams.set('search', params.search);
+    if (params?.limit) searchParams.set('limit', params.limit.toString());
+    if (params?.offset) searchParams.set('offset', params.offset.toString());
+
+    const qs = searchParams.toString();
+    return this.request(`/api/system/logs${qs ? `?${qs}` : ''}`);
+  }
+
+  public async exportSystemLogs(params?: {
+    format?: 'json' | 'csv';
+    level?: string;
+    category?: string;
+    search?: string;
+  }): Promise<{ content: string; filename: string }> {
+    const searchParams = new URLSearchParams();
+    searchParams.set('format', params?.format || 'json');
+    if (params?.level && params.level !== 'ALL') searchParams.set('level', params.level);
+    if (params?.category && params.category !== 'ALL') searchParams.set('category', params.category);
+    if (params?.search) searchParams.set('search', params.search);
+
+    const headers: Record<string, string> = {
+      'x-tenant-id': this.activeTenantId,
+    };
+    if (this.sessionToken) {
+      headers['Authorization'] = `Bearer ${this.sessionToken}`;
+    }
+
+    const baseUrl = (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '');
+    const url = `${baseUrl}/api/system/logs/export?${searchParams.toString()}`;
+
+    const res = await fetch(url, { headers });
+    if (!res.ok) {
+      throw new Error(`Failed to export logs: HTTP ${res.status}`);
+    }
+
+    const disposition = res.headers.get('content-disposition');
+    let filename = `podconnect_logs_${Date.now()}.${params?.format || 'json'}`;
+    if (disposition && disposition.includes('filename=')) {
+      const match = disposition.match(/filename="?([^";]+)"?/);
+      if (match && match[1]) filename = match[1];
+    }
+
+    const content = await res.text();
+    return { content, filename };
+  }
+
+  public async clearSystemLogs(): Promise<{ success: boolean; message: string }> {
+    return this.request('/api/system/logs', { method: 'DELETE' });
+  }
 }
 
 export const api = new ApiClient();
