@@ -744,7 +744,10 @@ Format your response as a valid JSON array of objects:
 ]
 `;
 
-    const userApiKey = (req.headers['x-gemini-api-key'] as string) || process.env.GEMINI_API_KEY;
+    const rawKey = req.headers['x-gemini-api-key'] as string;
+    const userApiKey = (rawKey && !rawKey.startsWith('local-') && rawKey.length > 20)
+      ? rawKey
+      : process.env.GEMINI_API_KEY;
     const clientAi = userApiKey && userApiKey !== process.env.GEMINI_API_KEY
       ? new GoogleGenAI({ apiKey: userApiKey, httpOptions: { headers: { 'User-Agent': 'aistudio-build' } } })
       : ai;

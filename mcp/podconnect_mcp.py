@@ -62,7 +62,7 @@ def _http_request(endpoint: str, method: str = "GET", body: Optional[Dict[str, A
     }
 
     gemini_key = os.environ.get("GEMINI_API_KEY")
-    if gemini_key:
+    if gemini_key and not gemini_key.startswith("local-") and gemini_key != "your_gemini_api_key_here":
         headers["x-gemini-api-key"] = gemini_key
 
     effective_token = token or _CACHED_SESSION_TOKEN or agent_key
