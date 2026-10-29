@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'path';
 import crypto from 'node:crypto';
+import os from 'node:os';
 import { fileURLToPath } from 'url';
 import {
   Tenant,
@@ -24,9 +25,9 @@ export function resolveDatabasePath(): string {
   if (process.env.DATABASE_PATH) {
     return path.resolve(process.env.DATABASE_PATH);
   }
-  // On Vercel / serverless edge runtimes, only /tmp is writable
+  // On Vercel / serverless edge runtimes, only tmp directory is writable
   if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) {
-    const tmpDb = path.join('/tmp', 'podconnect_leads.db');
+    const tmpDb = path.join(os.tmpdir(), 'podconnect_leads.db');
     const localDb = path.resolve(__dirname, '../../podconnect_leads.db');
     if (!fs.existsSync(tmpDb) && fs.existsSync(localDb)) {
       try {
@@ -1732,6 +1733,23 @@ export class DatabaseService {
     } else {
       this.db.prepare('DELETE FROM system_logs WHERE tenant_id = ?').run(tenantId);
     }
+  }
+
+  /**
+   * Creates an atomic point-in-time SQLite snapshot/backup
+   */
+  public vacuumIntoBackup(targetPath?: string): string {
+    const backupDir = targetPath ? path.dirname(targetPath) : path.resolve(__dirname, '../../backups');
+    if (!fs.existsSync(backupDir)) {
+      fs.mkdirSync(backupDir, { recursive: true });
+    }
+    const dest = targetPath || path.join(backupDir, `podconnect_backup_${Date.now()}.db`);
+    if (fs.existsSync(dest)) {
+      fs.unlinkSync(dest);
+    }
+    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+    this.db.exec(`VACUUM INTO '${dest}';`);
+    return dest;
   }
 }
 

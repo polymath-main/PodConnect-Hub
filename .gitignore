@@ -9,7 +9,10 @@ __pycache__/
 .env*
 !.env.example
 
-# SQLite temporary runtime lock files
+# SQLite database files
+*.db
+*.sqlite
+*.sqlite3
 *.db-wal
 *.db-shm
 .vercel

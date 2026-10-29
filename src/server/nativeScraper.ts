@@ -402,29 +402,44 @@ export async function runNativeScraperPipeline(
 
   let stagedCount = 0;
   const maxToInspect = Math.min(candidates.length, job.targetCount * 3);
+  const BATCH_SIZE = 4;
 
-  for (let idx = 0; idx < maxToInspect; idx++) {
-    if (stagedCount >= job.targetCount) break;
+  for (let idx = 0; idx < maxToInspect && stagedCount < job.targetCount; idx += BATCH_SIZE) {
+    const batch = candidates.slice(idx, Math.min(idx + BATCH_SIZE, maxToInspect));
+    const progress = Math.min(95, Math.floor(35 + ((idx + batch.length) / maxToInspect) * 55));
 
-    const cand = candidates[idx];
-    const progress = Math.min(95, Math.floor(35 + ((idx + 1) / maxToInspect) * 55));
+    onLog(
+      'INFO',
+      `Inspecting batch [${idx + 1}-${idx + batch.length}/${maxToInspect}]: ${batch.map((c) => c.showName).join(', ')}`,
+      undefined,
+      progress
+    );
 
-    onLog('INFO', `Inspecting feed [${idx + 1}/${maxToInspect}]: ${cand.showName} (${cand.genre})`, undefined, progress);
+    const results = await Promise.all(
+      batch.map(async (cand) => {
+        try {
+          return await parseRssFeed(cand.feedUrl, cand, job.niche, job.minSubs);
+        } catch {
+          return null;
+        }
+      })
+    );
 
-    const lead = await parseRssFeed(cand.feedUrl, cand, job.niche, job.minSubs);
-    if (lead) {
-      lead.clientId = job.clientId;
+    for (const lead of results) {
+      if (lead && stagedCount < job.targetCount) {
+        lead.clientId = job.clientId;
 
-      // Save to Staging Table
-      dbService.saveStagedLead(job.tenantId, lead);
-      stagedCount++;
+        // Save to Staging Table
+        dbService.saveStagedLead(job.tenantId, lead);
+        stagedCount++;
 
-      onLog(
-        'SUCCESS',
-        `Staged lead: ${lead.showName} | Host: ${lead.hostName} | Email: ${lead.email || 'None'} [${lead.emailType}]`,
-        lead,
-        progress
-      );
+        onLog(
+          'SUCCESS',
+          `Staged lead: ${lead.showName} | Host: ${lead.hostName} | Email: ${lead.email || 'None'} [${lead.emailType}]`,
+          lead,
+          progress
+        );
+      }
     }
   }
 
