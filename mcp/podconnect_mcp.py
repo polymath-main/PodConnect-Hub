@@ -30,10 +30,17 @@ PROTOCOL_VERSION = "2024-11-05"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = REPO_ROOT / "podconnect_leads.db"
 
-# Remote or local server base URL
-SERVER_URL = os.environ.get("PODCONNECT_URL", "http://localhost:3000").rstrip("/")
-AGENT_SECRET_KEY = os.environ.get("AGENT_SECRET_KEY", "agent_secret_default_podconnect")
-ACTIVE_TENANT_ID = os.environ.get("PODCONNECT_TENANT_ID", "tenant_default")
+# Default remote cloud production URL
+DEFAULT_PROD_URL = "https://pod-connect-hub.vercel.app"
+
+def get_server_url() -> str:
+    return os.environ.get("PODCONNECT_URL", DEFAULT_PROD_URL).rstrip("/")
+
+def get_agent_key() -> str:
+    return os.environ.get("AGENT_SECRET_KEY", "agent_secret_default_podconnect")
+
+def get_tenant_id() -> str:
+    return os.environ.get("PODCONNECT_TENANT_ID", "tenant_default")
 
 # In-memory cached session token
 _CACHED_SESSION_TOKEN: Optional[str] = None
@@ -43,14 +50,18 @@ _CACHED_SESSION_TOKEN: Optional[str] = None
 # HTTP Client Helper
 # ----------------------------------------------------------------------------
 def _http_request(endpoint: str, method: str = "GET", body: Optional[Dict[str, Any]] = None, token: Optional[str] = None) -> Dict[str, Any]:
-    url = f"{SERVER_URL}{endpoint if endpoint.startswith('/') else '/' + endpoint}"
+    server_url = get_server_url()
+    tenant_id = get_tenant_id()
+    agent_key = get_agent_key()
+
+    url = f"{server_url}{endpoint if endpoint.startswith('/') else '/' + endpoint}"
     headers = {
         "Content-Type": "application/json",
-        "x-tenant-id": ACTIVE_TENANT_ID,
+        "x-tenant-id": tenant_id,
         "User-Agent": f"PodConnect-MCP-Bridge/{SERVER_VERSION}",
     }
 
-    effective_token = token or _CACHED_SESSION_TOKEN or AGENT_SECRET_KEY
+    effective_token = token or _CACHED_SESSION_TOKEN or agent_key
     if effective_token:
         headers["Authorization"] = f"Bearer {effective_token}"
         headers["x-agent-key"] = effective_token
@@ -91,9 +102,9 @@ def _get_db() -> sqlite3.Connection:
 def tool_authenticate(params: Dict[str, Any]) -> Dict[str, Any]:
     """Authenticates the agent against PodConnect Hub."""
     global _CACHED_SESSION_TOKEN
-    agent_key = params.get("agent_key") or AGENT_SECRET_KEY
+    agent_key = params.get("agent_key") or get_agent_key()
     agent_id = params.get("agent_id", "agent_mcp")
-    tenant_id = params.get("tenant_id") or ACTIVE_TENANT_ID
+    tenant_id = params.get("tenant_id") or get_tenant_id()
 
     # Try HTTP Agent Auth API
     try:
@@ -108,7 +119,7 @@ def tool_authenticate(params: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as http_err:
         # Fallback to local key validation
         is_dev = os.environ.get("NODE_ENV") != "production"
-        valid = agent_key == AGENT_SECRET_KEY or (is_dev and agent_key == "agent_test_key_podconnect")
+        valid = agent_key == get_agent_key() or (is_dev and agent_key == "agent_test_key_podconnect")
         
         # Check local SQLite agent_api_keys table
         if not valid and agent_key.startswith("pca_live_"):
@@ -160,7 +171,7 @@ def tool_search_leads(params: Dict[str, Any]) -> Dict[str, Any]:
         # Direct SQLite fallback
         conn = _get_db()
         sql = "SELECT * FROM leads WHERE tenant_id = ?"
-        args: List[Any] = [ACTIVE_TENANT_ID]
+        args: List[Any] = [get_tenant_id()]
         if client_id and client_id != "ALL":
             sql += " AND client_id = ?"
             args.append(client_id)
@@ -189,7 +200,7 @@ def tool_get_staged_leads(params: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         conn = _get_db()
         sql = "SELECT * FROM staged_leads WHERE tenant_id = ?"
-        args: List[Any] = [ACTIVE_TENANT_ID]
+        args: List[Any] = [get_tenant_id()]
         if client_id and client_id != "ALL":
             sql += " AND client_id = ?"
             args.append(client_id)
@@ -246,19 +257,20 @@ def tool_generate_pitch(params: Dict[str, Any]) -> Dict[str, Any]:
 
 def tool_get_workspace_stats(params: Dict[str, Any]) -> Dict[str, Any]:
     """Get workspace telemetry, quota usage, and lead pipeline counts."""
+    tenant_id = get_tenant_id()
     try:
         return _http_request("/api/billing/status")
     except Exception:
         conn = _get_db()
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM leads WHERE tenant_id = ?", [ACTIVE_TENANT_ID])
+        cur.execute("SELECT COUNT(*) FROM leads WHERE tenant_id = ?", [tenant_id])
         lead_count = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM staged_leads WHERE tenant_id = ?", [ACTIVE_TENANT_ID])
+        cur.execute("SELECT COUNT(*) FROM staged_leads WHERE tenant_id = ?", [tenant_id])
         staged_count = cur.fetchone()[0]
         conn.close()
         return {
             "success": True,
-            "activeTenant": ACTIVE_TENANT_ID,
+            "activeTenant": tenant_id,
             "stats": {"leads": lead_count, "stagedLeads": staged_count},
             "source": "sqlite_local",
         }
@@ -266,8 +278,8 @@ def tool_get_workspace_stats(params: Dict[str, Any]) -> Dict[str, Any]:
 
 def tool_live_ping(params: Dict[str, Any]) -> Dict[str, Any]:
     """Ping the PodConnect Hub API server and check agent authentication."""
-    target_url = params.get("server_url") or SERVER_URL
-    agent_key = params.get("agent_key") or AGENT_SECRET_KEY
+    target_url = params.get("server_url") or get_server_url()
+    agent_key = params.get("agent_key") or get_agent_key()
 
     health_url = f"{target_url}/api/health"
     agent_url = f"{target_url}/api/auth/agent"

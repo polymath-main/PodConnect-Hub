@@ -353,14 +353,27 @@ Format your response as a valid JSON array of objects:
   }
 ]
 `;
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: prompt,
-        config: {
-          tools: [{ googleSearch: {} }],
-          responseMimeType: 'application/json',
-        },
-      });
+      const candidateModels = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-latest', 'gemini-3.8-flash'];
+      let response: any = null;
+      for (const m of candidateModels) {
+        try {
+          response = await ai.models.generateContent({
+            model: m,
+            contents: prompt,
+            config: {
+              tools: [{ googleSearch: {} }],
+              responseMimeType: 'application/json',
+            },
+          });
+          if (response && response.text) break;
+        } catch (err: any) {
+          console.warn(`[MCP discover_shows] Model ${m} failed: ${err.message}. Trying next candidate...`);
+        }
+      }
+
+      if (!response || !response.text) {
+        throw new Error('All candidate AI discovery models failed to generate content');
+      }
 
       let shows: any[] = [];
       try {
