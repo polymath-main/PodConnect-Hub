@@ -744,12 +744,24 @@ Format your response as a valid JSON array of objects:
 ]
 `;
 
-    const modelsToTry = ['gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-3.8-flash'];
+    const userApiKey = (req.headers['x-gemini-api-key'] as string) || process.env.GEMINI_API_KEY;
+    const clientAi = userApiKey && userApiKey !== process.env.GEMINI_API_KEY
+      ? new GoogleGenAI({ apiKey: userApiKey, httpOptions: { headers: { 'User-Agent': 'aistudio-build' } } })
+      : ai;
+
+    const modelsToTry = [
+      'gemini-2.5-flash',
+      'gemini-2.0-flash',
+      'gemini-flash-latest',
+      'gemini-1.5-flash',
+      'gemini-3.1-flash-lite',
+    ];
     let shows: any[] = [];
+    let lastError: any = null;
 
     for (const model of modelsToTry) {
       try {
-        const response = await ai.models.generateContent({
+        const response = await clientAi.models.generateContent({
           model,
           contents: prompt,
           config: {
@@ -768,8 +780,20 @@ Format your response as a valid JSON array of objects:
           if (Array.isArray(shows) && shows.length > 0) break;
         }
       } catch (err: any) {
+        lastError = err;
         console.warn(`[AI Engine] Discover shows model ${model} failed: ${err.message}. Trying next candidate...`);
       }
+    }
+
+    if (shows.length === 0 && lastError) {
+      const isQuota = lastError.status === 429 || String(lastError.message).includes('429') || String(lastError.message).includes('quota');
+      return res.status(isQuota ? 429 : 502).json({
+        success: false,
+        error: isQuota
+          ? 'Google Gemini API quota exceeded (HTTP 429). Please update GEMINI_API_KEY in Vercel or pass header x-gemini-api-key.'
+          : `AI model discovery failed: ${lastError.message}`,
+        shows: [],
+      });
     }
 
     // Direct in-process SQLite insertion with zero python subprocess overhead
@@ -1058,9 +1082,9 @@ app.delete('/api/auth/session', (req: AuthenticatedRequest, res: Response) => {
 
 // Authenticate agent via secret key
 app.post('/api/auth/agent', (req: AuthenticatedRequest, res: Response) => {
-  const key = (req.headers['x-agent-key'] as string) ||
-    (req.headers.authorization?.replace(/^Bearer\s+/i, '')) ||
-    req.body?.agentKey;
+  const key = req.body?.agentKey ||
+    (req.headers['x-agent-key'] as string) ||
+    (req.headers.authorization?.replace(/^Bearer\s+/i, ''));
   const check = validateAgentKey(key, req.body?.agentId);
   if (!check.valid) {
     return res.status(401).json({ success: false, authenticated: false, error: 'Unauthorized: Invalid agent secret key' });

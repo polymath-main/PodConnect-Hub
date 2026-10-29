@@ -353,8 +353,15 @@ Format your response as a valid JSON array of objects:
   }
 ]
 `;
-      const candidateModels = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-latest', 'gemini-3.8-flash'];
+      const candidateModels = [
+        'gemini-2.5-flash',
+        'gemini-2.0-flash',
+        'gemini-flash-latest',
+        'gemini-1.5-flash',
+        'gemini-3.1-flash-lite',
+      ];
       let response: any = null;
+      let lastMcpError: any = null;
       for (const m of candidateModels) {
         try {
           response = await ai.models.generateContent({
@@ -367,12 +374,18 @@ Format your response as a valid JSON array of objects:
           });
           if (response && response.text) break;
         } catch (err: any) {
+          lastMcpError = err;
           console.warn(`[MCP discover_shows] Model ${m} failed: ${err.message}. Trying next candidate...`);
         }
       }
 
       if (!response || !response.text) {
-        throw new Error('All candidate AI discovery models failed to generate content');
+        const isQuota = lastMcpError?.status === 429 || String(lastMcpError?.message).includes('429');
+        throw new Error(
+          isQuota
+            ? 'Google Gemini API quota exceeded (HTTP 429). Please check API key quota.'
+            : `All candidate AI discovery models failed to generate content: ${lastMcpError?.message || 'unknown error'}`
+        );
       }
 
       let shows: any[] = [];

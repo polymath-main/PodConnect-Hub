@@ -61,6 +61,10 @@ def _http_request(endpoint: str, method: str = "GET", body: Optional[Dict[str, A
         "User-Agent": f"PodConnect-MCP-Bridge/{SERVER_VERSION}",
     }
 
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if gemini_key:
+        headers["x-gemini-api-key"] = gemini_key
+
     effective_token = token or _CACHED_SESSION_TOKEN or agent_key
     if effective_token:
         headers["Authorization"] = f"Bearer {effective_token}"
@@ -112,6 +116,7 @@ def tool_authenticate(params: Dict[str, Any]) -> Dict[str, Any]:
             "/api/auth/agent",
             method="POST",
             body={"agentKey": agent_key, "agentId": agent_id, "tenantId": tenant_id},
+            token=agent_key,
         )
         if res.get("sessionToken"):
             _CACHED_SESSION_TOKEN = res["sessionToken"]
