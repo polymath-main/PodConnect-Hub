@@ -354,15 +354,15 @@ Format your response as a valid JSON array of objects:
 ]
 `;
       const candidateModels = [
-        'gemini-2.5-flash',
-        'gemini-2.0-flash',
-        'gemini-flash-latest',
-        'gemini-1.5-flash',
         'gemini-3.1-flash-lite',
+        'gemini-3.5-flash',
+        'gemini-3.8-flash',
+        'gemini-flash-latest',
       ];
       let response: any = null;
       let lastMcpError: any = null;
       for (const m of candidateModels) {
+        // 1. Try search grounding
         try {
           response = await ai.models.generateContent({
             model: m,
@@ -375,7 +375,24 @@ Format your response as a valid JSON array of objects:
           if (response && response.text) break;
         } catch (err: any) {
           lastMcpError = err;
-          console.warn(`[MCP discover_shows] Model ${m} failed: ${err.message}. Trying next candidate...`);
+          console.warn(`[MCP discover_shows] Grounded model ${m} failed: ${err.message}. Retrying direct synthesis...`);
+        }
+
+        // 2. Direct synthesis fallback (bypasses search grounding quota)
+        if (!response || !response.text) {
+          try {
+            response = await ai.models.generateContent({
+              model: m,
+              contents: prompt,
+              config: {
+                responseMimeType: 'application/json',
+              },
+            });
+            if (response && response.text) break;
+          } catch (err: any) {
+            lastMcpError = err;
+            console.warn(`[MCP discover_shows] Direct model ${m} failed: ${err.message}. Trying next candidate...`);
+          }
         }
       }
 

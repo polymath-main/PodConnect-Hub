@@ -750,16 +750,16 @@ Format your response as a valid JSON array of objects:
       : ai;
 
     const modelsToTry = [
-      'gemini-2.5-flash',
-      'gemini-2.0-flash',
-      'gemini-flash-latest',
-      'gemini-1.5-flash',
       'gemini-3.1-flash-lite',
+      'gemini-3.5-flash',
+      'gemini-3.8-flash',
+      'gemini-flash-latest',
     ];
     let shows: any[] = [];
     let lastError: any = null;
 
     for (const model of modelsToTry) {
+      // 1. Attempt with Search Grounding
       try {
         const response = await clientAi.models.generateContent({
           model,
@@ -781,7 +781,33 @@ Format your response as a valid JSON array of objects:
         }
       } catch (err: any) {
         lastError = err;
-        console.warn(`[AI Engine] Discover shows model ${model} failed: ${err.message}. Trying next candidate...`);
+        console.warn(`[AI Engine] Grounded discovery for ${model} failed: ${err.message}. Retrying direct synthesis...`);
+      }
+
+      // 2. Graceful fallback without googleSearch tool (bypasses search grounding quota)
+      if (!shows || shows.length === 0) {
+        try {
+          const directResponse = await clientAi.models.generateContent({
+            model,
+            contents: prompt,
+            config: {
+              responseMimeType: 'application/json',
+            },
+          });
+
+          if (directResponse.text) {
+            try {
+              shows = JSON.parse(directResponse.text);
+            } catch {
+              const match = directResponse.text.match(/\[\s*\{.*\}\s*\]/s);
+              if (match) shows = JSON.parse(match[0]);
+            }
+            if (Array.isArray(shows) && shows.length > 0) break;
+          }
+        } catch (err: any) {
+          lastError = err;
+          console.warn(`[AI Engine] Direct synthesis for ${model} failed: ${err.message}. Trying next candidate...`);
+        }
       }
     }
 
