@@ -19,6 +19,7 @@ import {
   syncClientToMasterSheet,
   scheduleClientMilestonesOnCalendar,
 } from '../lib/workspace';
+import { api } from '../lib/api';
 
 interface ClientOnboardingViewProps {
   onClientAdded: (client: Client) => void;
@@ -82,14 +83,11 @@ Agency: "Deal confirmed! We are archiving this agreement and provisioning your d
 
     try {
       const nextSeq = existingClientCount + 1;
-      const res = await fetch('/api/gemini/extract-transcript', {
+      const res = await api.request<any>('/api/gemini/extract-transcript', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ transcript, clientSequence: nextSeq }),
       });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error || 'Extraction failed');
-      setExtractedData(json.data);
+      setExtractedData(res.data);
     } catch (err: any) {
       alert(`Extraction failed: ${err.message}`);
     } finally {

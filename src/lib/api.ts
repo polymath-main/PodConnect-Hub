@@ -54,7 +54,7 @@ class ApiClient {
     this.userEmail = email;
   }
 
-  private async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+  public async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'x-tenant-id': this.activeTenantId,

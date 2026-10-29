@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { StagedLead, Client } from '../../types';
 import { LeadEditModal } from './LeadEditModal';
+import { api } from '../../lib/api';
 
 interface LeadStagingPanelProps {
   stagedLeads: StagedLead[];
@@ -83,12 +84,7 @@ export const LeadStagingPanel: React.FC<LeadStagingPanelProps> = ({
   const handleEditSave = async (updatedData: Partial<StagedLead>) => {
     if (!editingLead) return;
     try {
-      const res = await fetch(`/api/staged-leads/${editingLead.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updatedData),
-      });
-      if (!res.ok) throw new Error('Failed to update staged lead');
+      await api.updateStagedLead(editingLead.id, updatedData);
       setActionMessage({ type: 'success', text: `Updated ${editingLead.showName}` });
       onRefresh();
     } catch (err: any) {
@@ -98,8 +94,7 @@ export const LeadStagingPanel: React.FC<LeadStagingPanelProps> = ({
 
   const handleDeleteOne = async (id: number) => {
     try {
-      const res = await fetch(`/api/staged-leads/${id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Failed to discard lead');
+      await api.deleteStagedLead(id);
       setSelectedIds((prev) => prev.filter((i) => i !== id));
       onRefresh();
     } catch (err: any) {
@@ -113,7 +108,7 @@ export const LeadStagingPanel: React.FC<LeadStagingPanelProps> = ({
 
     try {
       for (const id of selectedIds) {
-        await fetch(`/api/staged-leads/${id}`, { method: 'DELETE' });
+        await api.deleteStagedLead(id);
       }
       setSelectedIds([]);
       setActionMessage({ type: 'success', text: `Discarded ${selectedIds.length} staged lead(s)` });
@@ -133,22 +128,16 @@ export const LeadStagingPanel: React.FC<LeadStagingPanelProps> = ({
     setImporting(true);
     setActionMessage(null);
     try {
-      const res = await fetch('/api/staged-leads/import', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids: idsToImport }),
-      });
-
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to import staged leads');
+      const res = await api.importStagedLeads(idsToImport);
+      const count = res.count || (res.importedLeads ? res.importedLeads.length : idsToImport.length);
 
       setActionMessage({
         type: 'success',
-        text: `Approved and imported ${data.importedCount} lead(s) into core database.`,
+        text: `Approved and imported ${count} lead(s) into core database.`,
       });
       setSelectedIds([]);
       onRefresh();
-      onImportSuccess(data.importedCount);
+      onImportSuccess(count);
     } catch (err: any) {
       setActionMessage({ type: 'error', text: err.message || 'Import failed' });
     } finally {

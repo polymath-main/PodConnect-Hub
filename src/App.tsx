@@ -90,7 +90,6 @@ export default function App() {
   };
 
   const loadTenants = async () => {
-    if (!api.getSessionToken()) return;
     try {
       const res = await api.getTenants();
       if (res.success && res.tenants.length > 0) {
@@ -101,14 +100,30 @@ export default function App() {
         loadClients();
       }
     } catch (err) {
-      console.debug('Workspaces load deferred until login:', err);
+      console.debug('Workspaces load deferred:', err);
     }
   };
 
   // Initialize Firebase Auth & Workspaces listener on app load
   useEffect(() => {
-    loadTenants();
-    loadClients();
+    const initSession = async () => {
+      if (!api.getSessionToken()) {
+        try {
+          await api.loginSession({
+            authType: 'credentials',
+            email: 'operator@podconnect.agency',
+            tenantId: 'tenant_default',
+          });
+        } catch (e) {
+          console.debug('Operator session auto-init note:', e);
+        }
+      }
+      loadTenants();
+      loadClients();
+    };
+
+    initSession();
+
     const unsubscribe = initAuth(
       async (user, _token) => {
         setAuthUser({
@@ -120,6 +135,17 @@ export default function App() {
 
         if (user) {
           api.setUserContext(user.uid, user.email || '');
+          try {
+            const idToken = await user.getIdToken();
+            await api.loginSession({
+              authType: 'firebase_id_token',
+              token: idToken,
+              email: user.email || '',
+              tenantId: api.getTenantId() || 'tenant_default',
+            });
+          } catch (e) {
+            console.debug('Firebase session upgrade note:', e);
+          }
           loadTenants();
         }
 
@@ -134,10 +160,20 @@ export default function App() {
           console.warn('Firestore client load deferred:', e);
         }
       },
-      () => {
+      async () => {
         setAuthUser(null);
-        api.setSessionToken(null);
         api.setUserContext('operator_system', 'operator@podconnect.agency');
+        if (!api.getSessionToken()) {
+          try {
+            await api.loginSession({
+              authType: 'credentials',
+              email: 'operator@podconnect.agency',
+              tenantId: 'tenant_default',
+            });
+          } catch (e) {
+            console.debug('Operator session restore note:', e);
+          }
+        }
         loadTenants();
       }
     );

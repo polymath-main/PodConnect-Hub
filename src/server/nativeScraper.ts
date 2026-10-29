@@ -225,33 +225,54 @@ export async function discoverEmailsForUrl(url: string, hostName?: string): Prom
 }
 
 /**
- * Searches Apple Podcasts public index
+ * Searches Apple Podcasts public index with multi-term query splitting and deduplication
  */
 export async function searchApplePodcasts(niche: string, limit: number = 20): Promise<any[]> {
   try {
-    const encoded = encodeURIComponent(niche.trim());
-    const apiUrl = `https://itunes.apple.com/search?term=${encoded}&media=podcast&entity=podcast&limit=${Math.max(limit * 3, 25)}`;
-    const res = await fetch(apiUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) PodConnect-NativeScraper/2.0',
-        Accept: 'application/json',
-      },
-    });
+    const rawTerms = niche
+      .split(/[,;|]/)
+      .map((t) => t.trim())
+      .filter((t) => t.length > 1);
 
-    if (!res.ok) return [];
-    const data = await res.json();
-    const results = data.results || [];
+    const terms = rawTerms.length > 0 ? rawTerms : [niche.trim() || 'Podcast'];
+    const seenUrls = new Set<string>();
+    const allResults: any[] = [];
+    const queryLimit = Math.min(200, Math.max(limit * 3, 50));
 
-    return results
-      .filter((r: any) => r.feedUrl && r.collectionName)
-      .map((r: any) => ({
-        showName: String(r.collectionName).trim(),
-        artistName: String(r.artistName || 'Show Host').trim(),
-        feedUrl: String(r.feedUrl).trim(),
-        appleUrl: String(r.trackViewUrl || ''),
-        genre: String(r.primaryGenreName || 'Podcast'),
-        artwork: String(r.artworkUrl600 || r.artworkUrl100 || ''),
-      }));
+    for (const term of terms) {
+      const encoded = encodeURIComponent(term);
+      const apiUrl = `https://itunes.apple.com/search?term=${encoded}&media=podcast&entity=podcast&limit=${queryLimit}`;
+      try {
+        const res = await fetch(apiUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) PodConnect-NativeScraper/2.0',
+            Accept: 'application/json',
+          },
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          const results = data.results || [];
+          for (const r of results) {
+            if (r.feedUrl && r.collectionName && !seenUrls.has(r.feedUrl)) {
+              seenUrls.add(r.feedUrl);
+              allResults.push({
+                showName: String(r.collectionName).trim(),
+                artistName: String(r.artistName || 'Show Host').trim(),
+                feedUrl: String(r.feedUrl).trim(),
+                appleUrl: String(r.trackViewUrl || ''),
+                genre: String(r.primaryGenreName || 'Podcast'),
+                artwork: String(r.artworkUrl600 || r.artworkUrl100 || ''),
+              });
+            }
+          }
+        }
+      } catch (err) {
+        console.warn(`[NativeScraper] Search error for "${term}":`, err);
+      }
+    }
+
+    return allResults;
   } catch (err) {
     console.warn('[NativeScraper] Apple Podcasts search error:', err);
     return [];
@@ -389,19 +410,30 @@ export async function runNativeScraperPipeline(
   onLog('INFO', `[Native Engine] Starting zero-dependency podcast sourcing for "${job.niche}" (Min Subs: ${job.minSubs})...`, undefined, 10);
 
   // 1. Apple Podcasts Search
-  onLog('INFO', `[Native Engine] Querying Apple Podcasts public directory catalog...`, undefined, 20);
-  const candidates = await searchApplePodcasts(job.niche, job.targetCount);
+  onLog('INFO', `[Native Engine] Querying Apple Podcasts public directory catalog for "${job.niche}"...`, undefined, 20);
+  let candidates = await searchApplePodcasts(job.niche, job.targetCount);
 
-  if (candidates.length === 0) {
-    onLog('WARN', `[Native Engine] No direct hits on Apple directory for "${job.niche}". Expanding keyword terms...`, undefined, 25);
-    const broadCandidates = await searchApplePodcasts('Business and Technology', job.targetCount);
-    candidates.push(...broadCandidates);
+  // If candidate pool has fewer shows than 3x targetCount, expand search with related keywords
+  if (candidates.length < Math.max(job.targetCount * 3, 30)) {
+    onLog('WARN', `[Native Engine] Found ${candidates.length} candidate shows for "${job.niche}". Expanding query terms...`, undefined, 25);
+    const fallbackTerms = ['Business and Technology', 'Startups', 'Technology', 'Founder Stories'];
+    const seenUrls = new Set(candidates.map((c) => c.feedUrl));
+    for (const term of fallbackTerms) {
+      if (candidates.length >= Math.max(job.targetCount * 5, 60)) break;
+      const extra = await searchApplePodcasts(term, job.targetCount);
+      for (const e of extra) {
+        if (!seenUrls.has(e.feedUrl)) {
+          seenUrls.add(e.feedUrl);
+          candidates.push(e);
+        }
+      }
+    }
   }
 
   onLog('INFO', `[Native Engine] Discovered ${candidates.length} candidate shows. Inspecting RSS feeds and email contacts...`, undefined, 35);
 
   let stagedCount = 0;
-  const maxToInspect = Math.min(candidates.length, job.targetCount * 3);
+  const maxToInspect = Math.min(candidates.length, Math.max(job.targetCount * 6, 80));
   const BATCH_SIZE = 4;
 
   for (let idx = 0; idx < maxToInspect && stagedCount < job.targetCount; idx += BATCH_SIZE) {

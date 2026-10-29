@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { X, Save, Building2, Mail, Users, Tag, MapPin, Globe, FileText } from 'lucide-react';
 import { StagedLead, Lead } from '../../types';
+import { api } from '../../lib/api';
 
 interface LeadEditModalProps {
   lead: StagedLead | Lead;
@@ -53,13 +54,11 @@ export const LeadEditModal: React.FC<LeadEditModalProps> = ({
 
     // Call server on-demand email discovery/domain check endpoint
     try {
-      const res = await fetch('/api/leads/discover-emails', {
+      const data = await api.request<any>('/api/leads/discover-emails', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: `https://${domain}`, hostName: formData.hostName }),
       });
-      const data = await res.json();
-      if (res.ok && data.discovery) {
+      if (data && data.discovery) {
         const found = data.discovery.candidates?.find((c: any) => c.email.endsWith(`@${domain}`));
         if (found && found.domain_valid) {
           setDomainCheckResult({ valid: true, message: `Domain ${domain} is legitimate (${found.validation_reason})` });
