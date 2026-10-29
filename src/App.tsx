@@ -58,6 +58,35 @@ export default function App() {
     isLoading: false,
   });
 
+  const loadClients = async () => {
+    try {
+      const res = await api.getClients();
+      if (res.success && res.clients && res.clients.length > 0) {
+        setClients(res.clients);
+        if (!activeClientId) {
+          setActiveClientId(res.clients[0].id);
+        }
+        return;
+      }
+    } catch (e) {
+      console.warn('Database clients load deferred:', e);
+    }
+
+    if (authUser?.uid) {
+      try {
+        const cloudClients = await fetchClientsFromFirestore(authUser.uid);
+        if (cloudClients.length > 0) {
+          setClients(cloudClients);
+          if (!activeClientId) {
+            setActiveClientId(cloudClients[0].id);
+          }
+        }
+      } catch (e) {
+        console.warn('Firestore fallback client load deferred:', e);
+      }
+    }
+  };
+
   const loadTenants = async () => {
     try {
       const res = await api.getTenants();
@@ -66,6 +95,7 @@ export default function App() {
         const current = res.tenants.find((t) => t.id === res.activeTenantId) || res.tenants[0];
         setActiveTenant(current);
         api.setTenantId(current.id);
+        loadClients();
       }
     } catch (err) {
       console.warn('Failed to load workspaces:', err);
@@ -75,6 +105,7 @@ export default function App() {
   // Initialize Firebase Auth & Workspaces listener on app load
   useEffect(() => {
     loadTenants();
+    loadClients();
     const unsubscribe = initAuth(
       async (user, _token) => {
         setAuthUser({
@@ -229,6 +260,10 @@ export default function App() {
     setActiveClientId(newClient.id);
     setCurrentView('database');
 
+    api.saveClient(newClient).catch((err) =>
+      console.warn('Failed to save client to SQLite:', err)
+    );
+
     if (authUser) {
       saveClientToFirestore(newClient, authUser.uid).catch((err) =>
         console.error('Failed to sync new client to Firestore:', err)
@@ -239,6 +274,10 @@ export default function App() {
   const handleClientUpdated = (updatedClient: Client) => {
     setClients((prev) =>
       prev.map((c) => (c.id === updatedClient.id ? updatedClient : c))
+    );
+
+    api.saveClient(updatedClient).catch((err) =>
+      console.warn('Failed to update client in SQLite:', err)
     );
 
     if (authUser) {

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import sys
 import urllib.error
@@ -317,6 +318,81 @@ def tool_live_ping(params: Dict[str, Any]) -> Dict[str, Any]:
     return results
 
 
+def tool_get_clients(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Fetch active clients in the workspace."""
+    client_id = params.get("client_id")
+    endpoint = f"/api/clients/{client_id}" if client_id else "/api/clients"
+    try:
+        return _http_request(endpoint)
+    except Exception:
+        # SQLite local fallback
+        conn = _get_db()
+        cur = conn.cursor()
+        tenant_id = get_tenant_id()
+        if client_id:
+            cur.execute("SELECT * FROM clients WHERE tenant_id = ? AND id = ?", [tenant_id, client_id])
+            row = cur.fetchone()
+            conn.close()
+            return {"success": True, "count": 1 if row else 0, "clients": [dict(row)] if row else [], "source": "sqlite_local"}
+        else:
+            cur.execute("SELECT * FROM clients WHERE tenant_id = ? ORDER BY created_at DESC", [tenant_id])
+            rows = [dict(r) for r in cur.fetchall()]
+            conn.close()
+            return {"success": True, "count": len(rows), "clients": rows, "source": "sqlite_local"}
+
+
+def tool_save_client(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Create or update a client in the database."""
+    return _http_request("/api/clients", method="POST", body=params)
+
+
+def tool_query_database(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Directly query the database with read-only SQL."""
+    query = params.get("query")
+    if not query:
+        raise ValueError("query parameter is required")
+    query_params = params.get("params", [])
+
+    try:
+        return _http_request("/api/db/query", method="POST", body={"query": query, "params": query_params})
+    except Exception:
+        # Direct local SQLite execution
+        first_word = query.strip().split()[0].upper()
+        if first_word not in ("SELECT", "PRAGMA", "EXPLAIN", "WITH"):
+            raise ValueError(f"Only SELECT and PRAGMA read queries permitted. Prohibited: {first_word}")
+        disallowed = ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE", "REPLACE"]
+        for kw in disallowed:
+            if re.search(rf"\b{kw}\b", query, re.I):
+                raise ValueError(f"Query contains prohibited statement: {kw}")
+
+        conn = _get_db()
+        cur = conn.cursor()
+        cur.execute(query, query_params)
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return {"success": True, "count": len(rows), "rows": rows, "source": "sqlite_local"}
+
+
+def tool_get_database_schema(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Inspect database schema, table definitions, and row counts."""
+    try:
+        return _http_request("/api/db/schema")
+    except Exception:
+        conn = _get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+        tables = [r[0] for r in cur.fetchall()]
+        res = {}
+        for t in tables:
+            cur.execute(f"PRAGMA table_info({t})")
+            cols = [{"name": c[1], "type": c[2], "notnull": bool(c[3]), "pk": bool(c[5])} for c in cur.fetchall()]
+            cur.execute(f"SELECT count(*) FROM {t}")
+            cnt = cur.fetchone()[0]
+            res[t] = {"rowCount": cnt, "columns": cols}
+        conn.close()
+        return {"success": True, "schema": {"database": "SQLite (Local Core)", "tablesCount": len(tables), "tables": res}, "source": "sqlite_local"}
+
+
 # ----------------------------------------------------------------------------
 # Catalog & Dispatch Table
 # ----------------------------------------------------------------------------
@@ -408,6 +484,50 @@ MCP_TOOLS: List[Dict[str, Any]] = [
             },
         },
     },
+    {
+        "name": "podconnect_get_clients",
+        "description": "Fetch active clients list in the workspace including target niches, pricing, message pillars, and placement targets.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "client_id": {"type": "string", "description": "Optional specific client ID (e.g. C001)"},
+            },
+        },
+    },
+    {
+        "name": "podconnect_save_client",
+        "description": "Create or update client specifications, target niches, message pillars, and placement goals in the database.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Client ID (e.g. C001)"},
+                "name": {"type": "string", "description": "Client name"},
+                "niche": {"type": "string", "description": "Target niche"},
+                "platform": {"type": "string", "description": "Target platform"},
+                "package": {"type": "string", "description": "Package name"},
+                "pricing": {"type": "string", "description": "Pricing terms"},
+                "minSubscribers": {"type": "number", "description": "Min audience requirement"},
+            },
+            "required": ["name", "niche"],
+        },
+    },
+    {
+        "name": "podconnect_query_database",
+        "description": "Execute direct, read-only SQL queries on the relational SQLite database (SELECT queries only).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Read-only SQL query (e.g. 'SELECT * FROM clients', 'SELECT * FROM leads WHERE status=\"Booked\"')"},
+                "params": {"type": "array", "items": {}, "description": "Positional query parameters"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "podconnect_get_database_schema",
+        "description": "Inspect the relational database topology, all table names, columns, data types, and record counts.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
 ]
 
 _DISPATCH = {
@@ -419,6 +539,10 @@ _DISPATCH = {
     "podconnect_generate_pitch": tool_generate_pitch,
     "podconnect_get_workspace_stats": tool_get_workspace_stats,
     "podconnect_live_ping": tool_live_ping,
+    "podconnect_get_clients": tool_get_clients,
+    "podconnect_save_client": tool_save_client,
+    "podconnect_query_database": tool_query_database,
+    "podconnect_get_database_schema": tool_get_database_schema,
 }
 
 

@@ -249,6 +249,87 @@ app.delete('/api/leads/:id', (req: AuthenticatedRequest, res: Response) => {
   }
 });
 
+// ==========================================
+// CLIENTS MANAGEMENT (RELATIONAL CORE)
+// ==========================================
+
+// List all clients in tenant
+app.get('/api/clients', (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const tenantId = req.tenantId || 'tenant_default';
+    const clients = dbService.getClients(tenantId);
+    res.json({ success: true, count: clients.length, clients });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message || 'Failed to query clients' });
+  }
+});
+
+// Get single client
+app.get('/api/clients/:id', (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const tenantId = req.tenantId || 'tenant_default';
+    const client = dbService.getClient(tenantId, req.params.id);
+    if (!client) {
+      return res.status(404).json({ success: false, error: 'Client not found' });
+    }
+    res.json({ success: true, client });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message || 'Failed to query client' });
+  }
+});
+
+// Save or update client
+app.post('/api/clients', (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const tenantId = req.tenantId || 'tenant_default';
+    const client = dbService.saveClient(tenantId, req.body);
+    res.json({ success: true, client });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message || 'Failed to save client' });
+  }
+});
+
+// Delete client
+app.delete('/api/clients/:id', (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const tenantId = req.tenantId || 'tenant_default';
+    const ok = dbService.deleteClient(tenantId, req.params.id);
+    res.json({ success: ok });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message || 'Failed to delete client' });
+  }
+});
+
+// ==========================================
+// DIRECT DATABASE QUERY & SCHEMA INSPECTION
+// ==========================================
+
+// Direct read-only SQL query execution
+app.post('/api/db/query', (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const tenantId = req.tenantId || 'tenant_default';
+    const { query, params = [] } = req.body;
+    if (!query || typeof query !== 'string') {
+      return res.status(400).json({ success: false, error: 'query string parameter is required' });
+    }
+    const rows = dbService.queryDatabase(tenantId, query, params);
+    res.json({ success: true, count: rows.length, rows });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message || 'Query execution failed' });
+  }
+});
+
+// Database schema and tables inspection
+app.get('/api/db/schema', (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const tenantId = req.tenantId || 'tenant_default';
+    const schema = dbService.getDatabaseSchema(tenantId);
+    res.json({ success: true, schema });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message || 'Failed to inspect schema' });
+  }
+});
+
 // Re-assign or duplicate lead from Central Bank to specific client campaign
 app.post('/api/leads/assign-client', (req: AuthenticatedRequest, res: Response) => {
   try {

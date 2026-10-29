@@ -247,6 +247,46 @@ class ApiClient {
   }
 
   // ==========================================
+  // CLIENTS MANAGEMENT
+  // ==========================================
+
+  public async getClients(): Promise<{ success: boolean; count: number; clients: any[] }> {
+    return this.request('/api/clients');
+  }
+
+  public async getClient(id: string): Promise<{ success: boolean; client: any }> {
+    return this.request(`/api/clients/${id}`);
+  }
+
+  public async saveClient(client: any): Promise<{ success: boolean; client: any }> {
+    return this.request('/api/clients', {
+      method: 'POST',
+      body: JSON.stringify(client),
+    });
+  }
+
+  public async deleteClient(id: string): Promise<{ success: boolean }> {
+    return this.request(`/api/clients/${id}`, {
+      method: 'DELETE',
+    });
+  }
+
+  // ==========================================
+  // DIRECT DATABASE QUERY & SCHEMA INSPECTION
+  // ==========================================
+
+  public async queryDatabase(query: string, params: any[] = []): Promise<{ success: boolean; count: number; rows: any[] }> {
+    return this.request('/api/db/query', {
+      method: 'POST',
+      body: JSON.stringify({ query, params }),
+    });
+  }
+
+  public async getDatabaseSchema(): Promise<{ success: boolean; schema: any }> {
+    return this.request('/api/db/schema');
+  }
+
+  // ==========================================
   // GEMINI AI ENGINES
   // ==========================================
 

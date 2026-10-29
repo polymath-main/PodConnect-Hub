@@ -131,6 +131,58 @@ export const MCP_TOOLS: McpToolDefinition[] = [
       properties: {},
     },
   },
+  {
+    name: 'get_clients',
+    description: 'Fetch the active clients list in the workspace including target niches, pricing, message pillars, and placement targets.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        client_id: { type: 'string', description: 'Optional specific client ID (e.g. C001)' },
+      },
+    },
+  },
+  {
+    name: 'save_client',
+    description: 'Create or update client specifications, target niches, message pillars, and placement goals in the relational database.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Client ID (e.g. C001, C002)' },
+        name: { type: 'string', description: 'Client company or person name' },
+        niche: { type: 'string', description: 'Target market niche or keywords' },
+        platform: { type: 'string', description: 'Target media platform' },
+        package: { type: 'string', description: 'Service package name' },
+        pricing: { type: 'string', description: 'Contract pricing terms' },
+        minSubscribers: { type: 'number', description: 'Minimum subscriber audience threshold' },
+        contractDays: { type: 'number', description: 'Contract duration in days' },
+        targetPlacements: { type: 'number', description: 'Target completed podcast placements' },
+        messagePillars: { type: 'array', items: { type: 'string' }, description: 'Core talking points and expertise pillars' },
+        credibilityAssets: { type: 'array', items: { type: 'string' }, description: 'Key achievements, metrics, and authority signals' },
+        samplePitchAngle: { type: 'string', description: 'Sample podcast hook or angle' },
+      },
+      required: ['name', 'niche'],
+    },
+  },
+  {
+    name: 'query_database',
+    description: 'Execute direct, read-only SQL queries on the relational SQLite database (SELECT queries only, strict tenant isolation).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Read-only SQL query (e.g., SELECT * FROM clients, SELECT * FROM leads WHERE status="Booked")' },
+        params: { type: 'array', items: {}, description: 'Positional query parameters for parameterized queries' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'get_database_schema',
+    description: 'Inspect the relational database topology, all table names, columns, data types, and record counts.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
 ];
 
 /**
@@ -629,6 +681,37 @@ Format your response as a valid JSON array of objects:
           statusBreakdown,
         },
       };
+    }
+
+    case 'get_clients': {
+      const { client_id } = args;
+      if (client_id) {
+        const client = dbService.getClient(tenantId, String(client_id));
+        return { success: true, count: client ? 1 : 0, clients: client ? [client] : [] };
+      }
+      const clients = dbService.getClients(tenantId);
+      return { success: true, count: clients.length, clients };
+    }
+
+    case 'save_client': {
+      if (!args.name || !args.niche) {
+        throw new Error('name and niche parameters are required to save a client');
+      }
+      const saved = dbService.saveClient(tenantId, args);
+      return { success: true, client: saved };
+    }
+
+    case 'query_database': {
+      const { query: sqlQuery, params = [] } = args;
+      if (!sqlQuery || typeof sqlQuery !== 'string') {
+        throw new Error('query parameter is required');
+      }
+      const rows = dbService.queryDatabase(tenantId, sqlQuery, Array.isArray(params) ? params : []);
+      return { success: true, count: rows.length, rows };
+    }
+
+    case 'get_database_schema': {
+      return dbService.getDatabaseSchema(tenantId);
     }
 
     default:

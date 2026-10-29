@@ -228,6 +228,36 @@ export class DatabaseService {
       );
     `);
 
+    // 10. Clients table (relational client profiles & targeting)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS clients (
+        id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL DEFAULT 'tenant_default',
+        name TEXT NOT NULL,
+        platform TEXT DEFAULT 'YouTube & Apple Podcasts',
+        niche TEXT NOT NULL,
+        package TEXT DEFAULT '120-Day Growth Accelerator',
+        pricing TEXT DEFAULT '$6,000 Total ($3,000 Upfront / $3,000 M2)',
+        min_subscribers INTEGER DEFAULT 1000,
+        contract_days INTEGER DEFAULT 120,
+        start_date TEXT DEFAULT '2026-10-24',
+        end_date TEXT DEFAULT '2027-02-21',
+        stage TEXT DEFAULT 'Lead Sourcing',
+        status TEXT DEFAULT 'Active',
+        order_number TEXT,
+        target_placements INTEGER DEFAULT 10,
+        booked_placements INTEGER DEFAULT 0,
+        message_pillars TEXT,
+        credibility_assets TEXT,
+        sample_pitch_angle TEXT,
+        milestones TEXT,
+        docs TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (tenant_id, id)
+      );
+    `);
+
     // Migrations: Add tenant_id, email_type, email_confidence to staged_leads and leads if not present
     this.runMigrations();
 
@@ -299,6 +329,7 @@ export class DatabaseService {
       this.db.exec('CREATE INDEX IF NOT EXISTS idx_seq_stage ON outreach_sequences(tenant_id, pipeline_stage)');
       this.db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token)');
       this.db.exec('CREATE INDEX IF NOT EXISTS idx_user_agent_keys_key ON user_agent_keys(key)');
+      this.db.exec('CREATE INDEX IF NOT EXISTS idx_clients_tenant ON clients(tenant_id)');
     } catch {}
   }
 
@@ -1333,6 +1364,254 @@ export class DatabaseService {
   public revokeUserAgentKey(tenantId: string, id: string): boolean {
     this.db.prepare('UPDATE user_agent_keys SET revoked_at = CURRENT_TIMESTAMP WHERE id = ? AND tenant_id = ?').run(id, tenantId);
     return true;
+  }
+
+  // ==========================================
+  // CLIENTS MANAGEMENT (RELATIONAL CORE)
+  // ==========================================
+
+  public getClients(tenantId: string): any[] {
+    const rows = this.db.prepare('SELECT * FROM clients WHERE tenant_id = ? ORDER BY created_at DESC').all(tenantId) as any[];
+    if (rows.length === 0 && (tenantId === 'tenant_default' || tenantId === 'tenant_mvt339l9_eogl')) {
+      this.seedDefaultClient(tenantId);
+      const seeded = this.db.prepare('SELECT * FROM clients WHERE tenant_id = ? ORDER BY created_at DESC').all(tenantId) as any[];
+      return seeded.map((r) => this.mapClientRow(r));
+    }
+    return rows.map((r) => this.mapClientRow(r));
+  }
+
+  public getClient(tenantId: string, clientId: string): any | null {
+    const row = this.db.prepare('SELECT * FROM clients WHERE tenant_id = ? AND id = ?').get(tenantId, clientId) as any;
+    return row ? this.mapClientRow(row) : null;
+  }
+
+  public saveClient(tenantId: string, client: any): any {
+    const id = client.id || `C${String(Date.now()).slice(-3)}`;
+    const stmt = this.db.prepare(`
+      INSERT INTO clients (
+        id, tenant_id, name, platform, niche, package, pricing, min_subscribers,
+        contract_days, start_date, end_date, stage, status, order_number,
+        target_placements, booked_placements, message_pillars, credibility_assets,
+        sample_pitch_angle, milestones, docs, updated_at
+      ) VALUES (
+        @id, @tenantId, @name, @platform, @niche, @package, @pricing, @minSubscribers,
+        @contractDays, @startDate, @endDate, @stage, @status, @orderNumber,
+        @targetPlacements, @bookedPlacements, @messagePillars, @credibilityAssets,
+        @samplePitchAngle, @milestones, @docs, CURRENT_TIMESTAMP
+      )
+      ON CONFLICT(tenant_id, id) DO UPDATE SET
+        name = excluded.name,
+        platform = excluded.platform,
+        niche = excluded.niche,
+        package = excluded.package,
+        pricing = excluded.pricing,
+        min_subscribers = excluded.min_subscribers,
+        contract_days = excluded.contract_days,
+        start_date = excluded.start_date,
+        end_date = excluded.end_date,
+        stage = excluded.stage,
+        status = excluded.status,
+        order_number = excluded.order_number,
+        target_placements = excluded.target_placements,
+        booked_placements = excluded.booked_placements,
+        message_pillars = excluded.message_pillars,
+        credibility_assets = excluded.credibility_assets,
+        sample_pitch_angle = excluded.sample_pitch_angle,
+        milestones = excluded.milestones,
+        docs = excluded.docs,
+        updated_at = CURRENT_TIMESTAMP
+    `);
+
+    stmt.run({
+      id,
+      tenantId,
+      name: client.name || 'Untitled Client',
+      platform: client.platform || 'YouTube & Apple Podcasts',
+      niche: client.niche || 'Technology',
+      package: client.package || '120-Day Growth Accelerator',
+      pricing: client.pricing || '$6,000 Total ($3,000 Upfront / $3,000 M2)',
+      minSubscribers: client.minSubscribers || 1000,
+      contractDays: client.contractDays || 120,
+      startDate: client.startDate || '2026-10-24',
+      endDate: client.endDate || '2027-02-21',
+      stage: client.stage || 'Lead Sourcing',
+      status: client.status || 'Active',
+      orderNumber: client.orderNumber || `ORD-2026-${id}`,
+      targetPlacements: client.targetPlacements || 10,
+      bookedPlacements: client.bookedPlacements || 0,
+      messagePillars: typeof client.messagePillars === 'string' ? client.messagePillars : JSON.stringify(client.messagePillars || []),
+      credibilityAssets: typeof client.credibilityAssets === 'string' ? client.credibilityAssets : JSON.stringify(client.credibilityAssets || []),
+      samplePitchAngle: client.samplePitchAngle || '',
+      milestones: typeof client.milestones === 'string' ? client.milestones : JSON.stringify(client.milestones || []),
+      docs: typeof client.docs === 'string' ? client.docs : JSON.stringify(client.docs || {}),
+    });
+
+    return this.getClient(tenantId, id);
+  }
+
+  public deleteClient(tenantId: string, clientId: string): boolean {
+    const res = this.db.prepare('DELETE FROM clients WHERE tenant_id = ? AND id = ?').run(tenantId, clientId);
+    return res.changes > 0;
+  }
+
+  private seedDefaultClient(tenantId: string) {
+    try {
+      this.saveClient(tenantId, {
+        id: 'C001',
+        name: 'HyperScale AI',
+        platform: 'YouTube & Apple Podcasts',
+        niche: 'B2B SaaS, Cloud DevOps, AI Infrastructure',
+        package: '120-Day Growth Accelerator',
+        pricing: '$6,000 Total ($3,000 Upfront / $3,000 M2)',
+        minSubscribers: 2500,
+        contractDays: 120,
+        startDate: '2026-10-24',
+        endDate: '2027-02-21',
+        stage: 'Lead Sourcing',
+        status: 'Active',
+        orderNumber: 'ORD-2026-C001',
+        targetPlacements: 10,
+        bookedPlacements: 1,
+        messagePillars: [
+          'Why AI agents will replace traditional SaaS dashboards by 2027',
+          'How to scale vector databases to 100M+ queries with zero downtime',
+          'Lessons learned bootstrapping to $1.2M ARR before institutional capital',
+        ],
+        credibilityAssets: [
+          'Scaled developer platform to 45k monthly active engineers',
+          'Ranked #1 on Hacker News twice with 800+ upvotes',
+        ],
+        samplePitchAngle: 'High-leverage engineering and founder insights on AI agents replacing traditional web dashboards.',
+        milestones: [
+          {
+            title: 'Kickoff, Messaging Profile & First 15 Pitches',
+            dayOffset: 30,
+            dueDate: '2026-11-23',
+            completed: true,
+          },
+          {
+            title: 'First Wave of Recorded Interviews Published',
+            dayOffset: 60,
+            dueDate: '2026-12-23',
+            completed: false,
+          },
+          {
+            title: 'Mid-Contract Performance Review & Niche Expansion',
+            dayOffset: 90,
+            dueDate: '2027-01-22',
+            completed: false,
+          },
+          {
+            title: 'Final Placement Close & Audience Asset Wrap-up',
+            dayOffset: 120,
+            dueDate: '2027-02-21',
+            completed: false,
+          },
+        ],
+        docs: {
+          requirementsDocTitle: 'Client_Requirements_HyperScale_AI',
+          conversationExportTitle: 'Conversation_Export_HyperScale_AI',
+          outreachStrategyDocTitle: 'Outreach_Strategy_HyperScale_AI',
+        },
+      });
+    } catch (e) {
+      console.warn('seedDefaultClient warning:', e);
+    }
+  }
+
+  private mapClientRow(r: any): any {
+    return {
+      id: r.id,
+      tenantId: r.tenant_id,
+      name: r.name,
+      platform: r.platform,
+      niche: r.niche,
+      package: r.package,
+      pricing: r.pricing,
+      minSubscribers: r.min_subscribers,
+      contractDays: r.contract_days,
+      startDate: r.start_date,
+      endDate: r.end_date,
+      stage: r.stage,
+      status: r.status,
+      orderNumber: r.order_number,
+      targetPlacements: r.target_placements,
+      bookedPlacements: r.booked_placements,
+      messagePillars: this.safeParse(r.message_pillars, []),
+      credibilityAssets: this.safeParse(r.credibility_assets, []),
+      samplePitchAngle: r.sample_pitch_angle || '',
+      milestones: this.safeParse(r.milestones, []),
+      docs: this.safeParse(r.docs, {}),
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+    };
+  }
+
+  private safeParse(jsonStr: string | null | undefined, fallback: any): any {
+    if (!jsonStr) return fallback;
+    try {
+      return JSON.parse(jsonStr);
+    } catch {
+      return fallback;
+    }
+  }
+
+  // ==========================================
+  // DIRECT DATABASE QUERY & SCHEMA INSPECTION
+  // ==========================================
+
+  public queryDatabase(tenantId: string, sqlQuery: string, params: any[] = []): any[] {
+    const trimmed = sqlQuery.trim();
+    // Safety guard: only SELECT, PRAGMA, EXPLAIN, WITH statements allowed
+    const firstWord = trimmed.split(/\s+/)[0].toUpperCase();
+    if (firstWord !== 'SELECT' && firstWord !== 'PRAGMA' && firstWord !== 'EXPLAIN' && firstWord !== 'WITH') {
+      throw new Error(`Unauthorized query: only SELECT and PRAGMA read queries are permitted. Prohibited: ${firstWord}`);
+    }
+
+    const disallowedKeywords = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'CREATE', 'TRUNCATE', 'REPLACE', 'ATTACH', 'DETACH', 'VACUUM'];
+    for (const kw of disallowedKeywords) {
+      const regex = new RegExp(`\\b${kw}\\b`, 'i');
+      if (regex.test(trimmed)) {
+        throw new Error(`Unauthorized query: statement contains prohibited operation keyword '${kw}'`);
+      }
+    }
+
+    const stmt = this.db.prepare(trimmed);
+    const rows = Array.isArray(params) && params.length > 0 ? stmt.all(...params) : stmt.all();
+    return rows;
+  }
+
+  public getDatabaseSchema(tenantId?: string): any {
+    const tables = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as any[];
+    const result: Record<string, any> = {};
+
+    for (const table of tables) {
+      const tableName = table.name;
+      const columns = this.db.prepare(`PRAGMA table_info(${tableName})`).all() as any[];
+      let rowCount = 0;
+      try {
+        const countRow = this.db.prepare(`SELECT count(*) as count FROM ${tableName}`).get() as any;
+        rowCount = countRow?.count || 0;
+      } catch {}
+
+      result[tableName] = {
+        rowCount,
+        columns: columns.map((c) => ({
+          name: c.name,
+          type: c.type,
+          notNull: !!c.notnull,
+          defaultValue: c.dflt_value,
+          primaryKey: !!c.pk,
+        })),
+      };
+    }
+
+    return {
+      database: 'SQLite (Relational Core)',
+      tablesCount: tables.length,
+      tenantId: tenantId || 'tenant_default',
+      tables: result,
+    };
   }
 }
 
