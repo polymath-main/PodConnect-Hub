@@ -5,10 +5,18 @@ import { fileURLToPath } from 'url';
 import { Response } from 'express';
 import { dbService } from './db.js';
 import { ScrapeJob } from '../types';
+import { runNativeScraperPipeline } from './nativeScraper.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const SCRAPER_SCRIPT_PATH = path.resolve(__dirname, '../../scraper.py');
+
+/**
+ * Detects if running on Vercel or pure serverless environment where python is absent
+ */
+export function isServerlessRuntime(): boolean {
+  return !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.NOW_REGION);
+}
 
 /**
  * Dynamically resolves the Python binary across Termux and standard server runtimes
@@ -164,7 +172,88 @@ export class JobQueueManager {
   }
 
   /**
-   * Spawn worker process for a job
+   * Run in-process Native TypeScript crawler for serverless runtimes (e.g. Vercel)
+   */
+  private async runNativeWorker(job: ScrapeJob) {
+    try {
+      dbService.appendJobLog(job.id, 'INFO', `[Native Engine] Executing zero-dependency pipeline for ${job.niche}`);
+      this.broadcast(job, {
+        type: 'job_log',
+        jobId: job.id,
+        log: {
+          timestamp: new Date().toISOString(),
+          level: 'INFO',
+          message: `[Native Engine] Executing in-process crawler for ${job.niche} (Vercel/Serverless compatible)`,
+        },
+        job,
+      });
+
+      await runNativeScraperPipeline(job, (level, message, lead, progress) => {
+        if (progress !== undefined) {
+          job.progress = Math.min(100, Math.max(job.progress, progress));
+          dbService.updateJob(job.id, { progress: job.progress });
+        }
+        if (lead) {
+          job.foundCount++;
+          job.stagedCount++;
+          dbService.updateJob(job.id, {
+            foundCount: job.foundCount,
+            stagedCount: job.stagedCount,
+          });
+        }
+        dbService.appendJobLog(job.id, level, message, lead);
+        this.broadcast(job, {
+          type: 'job_log',
+          jobId: job.id,
+          log: {
+            timestamp: new Date().toISOString(),
+            level,
+            message,
+            lead,
+          },
+          job,
+        });
+      });
+
+      job.status = 'completed';
+      job.progress = 100;
+      job.completedAt = new Date().toISOString();
+      dbService.updateJob(job.id, {
+        status: job.status,
+        progress: job.progress,
+        completedAt: job.completedAt,
+        foundCount: job.foundCount,
+        stagedCount: job.stagedCount,
+      });
+
+      this.broadcast(job, {
+        type: 'job_completed',
+        job,
+        message: `Native scraper job completed: staged ${job.stagedCount} leads for review`,
+      });
+    } catch (err: any) {
+      job.status = 'failed';
+      job.completedAt = new Date().toISOString();
+      job.errorMessage = `Native scraper error: ${err.message}`;
+      dbService.updateJob(job.id, {
+        status: job.status,
+        completedAt: job.completedAt,
+        errorMessage: job.errorMessage,
+      });
+      dbService.appendJobLog(job.id, 'ERROR', `Native scraper execution failed: ${err.message}`);
+      this.broadcast(job, {
+        type: 'job_completed',
+        jobId: job.id,
+        job,
+      });
+    } finally {
+      this.activeWorkers.delete(job.id);
+      this.processNext();
+    }
+  }
+
+  /**
+   * Spawn worker process for a job with automatic native fallback
    */
   private startWorker(job: ScrapeJob) {
     job.status = 'running';
@@ -183,6 +272,12 @@ export class JobQueueManager {
       job,
       message: `Worker started for ${job.niche}`,
     });
+
+    // If running in a serverless environment like Vercel where Python is not packaged, use Native Engine
+    if (isServerlessRuntime()) {
+      this.runNativeWorker(job);
+      return;
+    }
 
     const py = spawn(
       resolvePythonBinary(),
@@ -294,6 +389,18 @@ export class JobQueueManager {
 
     py.on('error', (err) => {
       this.activeWorkers.delete(job.id);
+
+      // If Python binary was missing (common on Vercel/Serverless), gracefully failover to native engine
+      if (err.message.includes('ENOENT') || err.message.includes('not found')) {
+        dbService.appendJobLog(
+          job.id,
+          'WARN',
+          `[Queue Failover] Python binary not found (${err.message}). Seamlessly engaging Native Node.js Sourcing Engine...`
+        );
+        this.runNativeWorker(job);
+        return;
+      }
+
       job.status = 'failed';
       job.completedAt = new Date().toISOString();
       job.errorMessage = `Worker process failed: ${err.message}`;

@@ -15,6 +15,7 @@ import { emailService } from './src/server/email.js';
 import { getLimits } from './src/lib/plans.js';
 import { handleMcpRequest, MCP_TOOLS } from './src/server/mcp.js';
 import { validateAgentKey } from './src/server/auth.js';
+import { discoverEmailsForUrl } from './src/server/nativeScraper.js';
 import type { OutreachSequence, PipelineStage, SequenceStep } from './src/types/index.js';
 
 dotenv.config();
@@ -418,10 +419,17 @@ app.post('/api/leads/discover-emails', async (req: AuthenticatedRequest, res: Re
       return res.status(400).json({ error: 'Target URL is required' });
     }
 
-    const scriptPath = path.resolve(__dirname, 'scraper.py');
-    const { stdout } = await execFileAsync('python3', [scriptPath, '--discover-email', url]);
-    const parsed = JSON.parse(stdout.trim());
-    res.json({ success: true, url, hostName, discovery: parsed });
+    // Try Python scraper if available; seamlessly failover to native Node.js discovery
+    try {
+      const scriptPath = path.resolve(__dirname, 'scraper.py');
+      const { stdout } = await execFileAsync('python3', [scriptPath, '--discover-email', url]);
+      const parsed = JSON.parse(stdout.trim());
+      return res.json({ success: true, url, hostName, discovery: parsed });
+    } catch (pyErr: any) {
+      // Fallback to Native Node.js Email Discovery module (Vercel/Serverless safe)
+      const nativeDiscovery = await discoverEmailsForUrl(url, hostName);
+      return res.json({ success: true, url, hostName, discovery: nativeDiscovery });
+    }
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Email discovery check failed' });
   }
